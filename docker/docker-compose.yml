@@ -1,0 +1,50 @@
+# Docker Compose — 一键启动所有服务
+version: "3.8"
+
+services:
+  # Gradio 前端 (主服务)
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: groundwater-llm-modeling:latest
+    container_name: groundwater-llm-frontend
+    ports:
+      - "7860:7860"
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
+      - LLM_MODEL=${LLM_MODEL:-deepseek/deepseek-chat}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_API_BASE=${LLM_API_BASE}
+      - GRADIO_PORT=7860
+      - PYTHONIOENCODING=utf-8
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gw-modeling.rule=Host(`gw-modeling.local`)"
+
+  # FastAPI 后端 (可选，供API调用)
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: groundwater-llm-modeling:latest
+    container_name: groundwater-llm-api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
+      - LLM_MODEL=${LLM_MODEL:-deepseek/deepseek-chat}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_API_BASE=${LLM_API_BASE}
+      - PYTHONIOENCODING=utf-8
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+    restart: unless-stopped
+    profiles:
+      - api  # 默认不启动，需要时 docker compose --profile api up
