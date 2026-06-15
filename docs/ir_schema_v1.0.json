@@ -1,0 +1,354 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://groundwater-llm-modeling/ir_schema_v1.0.json",
+  "title": "Groundwater Modeling Intermediate Representation (JSON IR)",
+  "description": "物理约束嵌入LLM的地下水智能建模 — 中间态参数协议 v1.0",
+  "version": "1.0.0",
+  "type": "object",
+  "required": ["ir_version", "project", "domain", "grid", "aquifer"],
+  "properties": {
+    "ir_version": {
+      "type": "string",
+      "description": "IR协议版本号",
+      "const": "1.0"
+    },
+    "project": {
+      "type": "object",
+      "required": ["name", "model_type"],
+      "properties": {
+        "name": {"type": "string", "description": "项目/模型名称"},
+        "description": {"type": "string", "description": "项目描述"},
+        "model_type": {
+          "type": "string",
+          "enum": ["groundwater_flow", "solute_transport", "reactive_transport"],
+          "description": "模拟类型"
+        }
+      }
+    },
+    "domain": {
+      "type": "object",
+      "required": ["x_range", "y_range", "units"],
+      "properties": {
+        "x_range": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": {"type": "number"},
+          "description": "模型X方向范围 [xmin, xmax]"
+        },
+        "y_range": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": {"type": "number"},
+          "description": "模型Y方向范围 [ymin, ymax]"
+        },
+        "units": {
+          "type": "string", "default": "meters",
+          "description": "长度单位"
+        },
+        "rotation_angle": {
+          "type": "number", "default": 0.0,
+          "description": "网格旋转角度（度）"
+        },
+        "crs": {
+          "type": "string", "description": "坐标参考系 (EPSG code)"
+        }
+      }
+    },
+    "grid": {
+      "type": "object",
+      "required": ["nrow", "ncol", "nlay"],
+      "properties": {
+        "nrow": {"type": "integer", "minimum": 1, "description": "行数"},
+        "ncol": {"type": "integer", "minimum": 1, "description": "列数"},
+        "nlay": {"type": "integer", "minimum": 1, "description": "层数"},
+        "delr": {
+          "oneOf": [
+            {"type": "number", "minimum": 0, "description": "均匀行宽 (m)"},
+            {"type": "array", "items": {"type": "number"}, "description": "各行宽度数组"}
+          ]
+        },
+        "delc": {
+          "oneOf": [
+            {"type": "number", "minimum": 0, "description": "均匀列宽 (m)"},
+            {"type": "array", "items": {"type": "number"}, "description": "各列宽度数组"}
+          ]
+        },
+        "top": {
+          "oneOf": [
+            {"type": "number", "description": "均匀顶层高程 (m)"},
+            {"type": "array", "description": "二维顶层高程数组"}
+          ]
+        },
+        "bottom": {
+          "oneOf": [
+            {"type": "number", "description": "均匀底层高程 (m)"},
+            {"type": "array", "description": "三维底层高程数组"}
+          ]
+        },
+        "refinement_zones": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {"enum": ["point", "polygon"]},
+              "coordinates": {},
+              "refinement_factor": {"type": "number"}
+            }
+          }
+        }
+      }
+    },
+    "aquifer": {
+      "type": "object",
+      "required": ["type", "parameters"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["confined", "unconfined", "convertible"],
+          "description": "含水层类型"
+        },
+        "parameters": {
+          "type": "object",
+          "required": ["hk"],
+          "properties": {
+            "hk": {
+              "$ref": "#/definitions/param_with_constraint",
+              "description": "水平渗透系数"
+            },
+            "vka": {
+              "$ref": "#/definitions/param_with_constraint",
+              "description": "垂向渗透系数"
+            },
+            "hani": {
+              "$ref": "#/definitions/param_with_constraint",
+              "description": "水平各向异性比"
+            },
+            "sy": {
+              "$ref": "#/definitions/param_with_constraint",
+              "description": "给水度"
+            },
+            "ss": {
+              "$ref": "#/definitions/param_with_constraint",
+              "description": "储水系数"
+            },
+            "porosity": {
+              "$ref": "#/definitions/param_with_constraint",
+              "description": "孔隙度"
+            }
+          }
+        },
+        "zones": {
+          "type": "array",
+          "description": "参数分区（非均质）",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "geometry": {},
+              "parameters": {"type": "object"}
+            }
+          }
+        }
+      }
+    },
+    "boundary_conditions": {
+      "type": "array",
+      "description": "边界条件列表",
+      "items": {
+        "type": "object",
+        "required": ["type", "name"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["chd", "ghb", "wel", "riv", "drn", "rch", "evt"],
+            "description": "边界条件类型"
+          },
+          "name": {"type": "string", "description": "边界名称"},
+          "geometry": {
+            "type": "object",
+            "properties": {
+              "shape": {"enum": ["point", "line", "polygon"]},
+              "coordinates": {},
+              "grid_indices": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "layer": {"type": "integer"},
+                    "row": {"type": "integer"},
+                    "col": {"type": "integer"}
+                  }
+                }
+              }
+            }
+          },
+          "parameters": {"type": "object", "description": "边界参数（头值、传导系数等）"},
+          "stress_periods": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "period": {"type": "integer"},
+                "value": {"type": "number"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "stress_periods": {
+      "type": "object",
+      "required": ["nper", "steady_state"],
+      "properties": {
+        "nper": {"type": "integer", "minimum": 1, "description": "应力期数量"},
+        "steady_state": {"type": "boolean", "description": "是否稳态"},
+        "period_data": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "perlen": {"type": "number", "description": "应力期长度 (d)"},
+              "nstp": {"type": "integer", "description": "时间步数"},
+              "tsmult": {"type": "number", "default": 1.0, "description": "步长乘子"}
+            }
+          }
+        }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean", "default": false},
+        "species": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "溶质组分列表"
+        },
+        "dispersion": {
+          "type": "object",
+          "properties": {
+            "al": {"$ref": "#/definitions/param_with_constraint"},
+            "trpt": {"$ref": "#/definitions/param_with_constraint"},
+            "trpv": {"$ref": "#/definitions/param_with_constraint"},
+            "diffc": {"$ref": "#/definitions/param_with_constraint"}
+          }
+        },
+        "advection": {
+          "type": "object",
+          "properties": {
+            "scheme": {
+              "type": "string",
+              "enum": ["upstream", "central", "tvd"],
+              "default": "upstream"
+            }
+          }
+        },
+        "reaction": {
+          "type": "object",
+          "properties": {
+            "sorption": {
+              "type": "string",
+              "enum": ["none", "linear", "freundlich", "langmuir"],
+              "default": "none"
+            },
+            "kd": {"$ref": "#/definitions/param_with_constraint"},
+            "decay": {
+              "type": "object",
+              "properties": {
+                "type": {"enum": ["none", "first_order", "multi_species"]},
+                "first_order_rate": {"$ref": "#/definitions/param_with_constraint"},
+                "half_life": {"$ref": "#/definitions/param_with_constraint"}
+              }
+            },
+            "rt3d_package": {"type": "string"}
+          }
+        }
+      }
+    },
+    "solver": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": ["pcg", "nwt", "sip", "sor"],
+          "default": "pcg",
+          "description": "求解器类型"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "hclose": {"type": "number", "default": 1e-5},
+            "rclose": {"type": "number", "default": 1e-3},
+            "max_iter": {"type": "integer", "default": 100},
+            "relax": {"type": "number", "default": 1.0}
+          }
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "head": {"type": "boolean", "default": true},
+        "drawdown": {"type": "boolean", "default": true},
+        "budget": {"type": "boolean", "default": true},
+        "concentration": {"type": "boolean", "default": false},
+        "observation_points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "layer": {"type": "integer"},
+              "row": {"type": "integer"},
+              "col": {"type": "integer"},
+              "x": {"type": "number"},
+              "y": {"type": "number"}
+            }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "created_by": {"type": "string"},
+        "validation_status": {
+          "type": "string",
+          "enum": ["pending", "in_progress", "passed", "failed"]
+        },
+        "validation_log": {"type": "array"},
+        "source_files": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  },
+  "definitions": {
+    "param_with_constraint": {
+      "type": "object",
+      "required": ["value", "unit"],
+      "properties": {
+        "value": {
+          "description": "参数值（标量、数组或null）"
+        },
+        "unit": {
+          "type": "string",
+          "description": "参数单位（SI标准单位）"
+        },
+        "valid_range": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"type": "number"},
+          "description": "物理取值范围 [min, max]"
+        },
+        "source": {
+          "type": "string",
+          "enum": ["user_input", "auto_suggestion", "default", "file_import"],
+          "description": "参数来源"
+        },
+        "confidence": {
+          "type": "string",
+          "enum": ["high", "medium", "low", "none"],
+          "description": "参数置信度"
+        }
+      }
+    }
+  }
+}
