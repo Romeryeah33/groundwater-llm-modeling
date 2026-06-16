@@ -333,7 +333,7 @@ class AutoModelBuilder:
             print_option="summary",
             outer_dvclose=solver_params.get("hclose", 1e-5),
             inner_dvclose=solver_params.get("rclose", 1e-3),
-            linear_acceleration=solver_params.get("name", "pcg").upper(),
+            linear_acceleration=solver_params.get("name", "CG"),
         )
 
     def _build_exchange(self, sim_name: str):

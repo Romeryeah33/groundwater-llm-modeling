@@ -40,6 +40,11 @@ EXPOSE 7860 8000
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONIOENCODING=utf-8
 ENV GRADIO_SERVER_NAME=0.0.0.0
+ENV GRADIO_ROOT_PATH=""
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860')" || exit 1
 
 # 默认启动 Gradio 前端
 CMD ["python", "-m", "app.frontend.gradio_app"]

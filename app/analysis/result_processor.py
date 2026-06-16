@@ -116,27 +116,41 @@ class ResultProcessor:
         """
         try:
             budget_obj = gwf.output.budget()
-            records = budget_obj.get_data()
+
+            # FloPy 3.8+: get_data() 需要 kstpkper/totim/idx/text 参数
+            try:
+                kstpkper_list = budget_obj.get_kstpkper()
+            except AttributeError:
+                kstpkper_list = [(0, 0)]
 
             inflow = {}
             outflow = {}
             total_in = 0.0
             total_out = 0.0
 
-            for rec in records:
-                if isinstance(rec, np.ndarray) and rec.dtype.names:
-                    for field in rec.dtype.names:
-                        q = np.sum(rec[field])
-                        if q > 0:
-                            component = field.replace("_", " ").title()
-                            inflow[component] = float(q)
-                            total_in += q
-                        elif q < 0:
-                            component = field.replace("_", " ").title()
-                            outflow[component] = float(abs(q))
-                            total_out += abs(q)
+            for kpk in kstpkper_list:
+                try:
+                    records = budget_obj.get_data(kstpkper=kpk)
+                except Exception:
+                    # 回退: 尝试用 idx
+                    try:
+                        records = budget_obj.get_data(idx=0)
+                    except Exception:
+                        # 最后回退: 旧版 FloPy 无参数调用
+                        records = budget_obj.get_data()
 
-            error = abs(total_in - total_out) / max(total_in, total_out, 1e-10)
+                if isinstance(records, np.ndarray):
+                    self._process_budget_records(records, inflow, outflow)
+                    total_in += sum(inflow.values())
+                    total_out += sum(outflow.values())
+                elif isinstance(records, list):
+                    for rec in records:
+                        if isinstance(rec, np.ndarray):
+                            self._process_budget_records(rec, inflow, outflow)
+                            total_in += sum(inflow.values())
+                            total_out += sum(outflow.values())
+
+            error = abs(total_in - total_out) / max(total_in, total_out, 1e-10) if total_in > 0 else 0.0
 
             return {
                 "inflow": inflow,
@@ -148,6 +162,19 @@ class ResultProcessor:
         except Exception as e:
             logger.warning(f"水量平衡提取失败: {e}")
             return {"error": str(e)}
+
+    @staticmethod
+    def _process_budget_records(records: np.ndarray, inflow: dict, outflow: dict):
+        """处理单条预算记录，将流入/流出累加到对应字典"""
+        if not (isinstance(records, np.ndarray) and records.dtype.names):
+            return
+        for field in records.dtype.names:
+            q = np.sum(records[field])
+            component = field.replace("_", " ").title()
+            if q > 0:
+                inflow[component] = inflow.get(component, 0.0) + float(q)
+            elif q < 0:
+                outflow[component] = outflow.get(component, 0.0) + float(abs(q))
 
     # ================================================================
     # 污染羽指标计算

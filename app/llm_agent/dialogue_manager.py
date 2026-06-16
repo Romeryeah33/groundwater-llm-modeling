@@ -16,6 +16,7 @@ from app.llm_agent.prompt_templates import (
     SUGGESTION_GENERATION_PROMPT,
 )
 from app.knowledge.semantic_db import SemanticDB, semantic_db
+from app.knowledge.param_guide import PARAM_GUIDE, render_missing_params_guidance
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,13 @@ class DialogueManager:
         )
 
         intent = parse_result["intent"]
-        self.state["json_ir"] = parse_result["json_ir"]
-        self.state["missing_params"] = parse_result["missing_params"]
+        # 防御：确保 json_ir 永远是 dict
+        json_ir = parse_result.get("json_ir", {})
+        if not isinstance(json_ir, dict):
+            logger.warning(f"parse 返回的 json_ir 是 {type(json_ir).__name__}，重置为空 dict")
+            json_ir = {}
+        self.state["json_ir"] = json_ir
+        self.state["missing_params"] = parse_result.get("missing_params", {"priority_1": [], "priority_2": [], "priority_3": []})
 
         # Step 2: 根据意图和阶段生成响应
         if intent == "confirm":
@@ -149,8 +155,8 @@ class DialogueManager:
         # 2. 生成下一个问题
         questions = self._generate_questions(missing)
 
-        # 3. 检查是否需要提供建议值
-        suggestions = self._maybe_generate_suggestions(missing.get("priority_3", []))
+        # 3. 检查是否需要提供建议值（覆盖 P1/P2/P3 全部优先级）
+        suggestions = self._maybe_generate_suggestions(missing)
 
         reply_parts = [summary]
 
@@ -216,7 +222,9 @@ class DialogueManager:
     def _summarize_progress(self, new_params: dict = None) -> str:
         """生成参数获取进度摘要"""
         new_params = new_params or {}
-        ir = self.state["json_ir"]
+        ir = self.state.get("json_ir", {})
+        if not isinstance(ir, dict):
+            ir = {}
         lines = ["📝 **当前参数状态：**"]
 
         # 项目信息
@@ -238,8 +246,11 @@ class DialogueManager:
         domain = ir.get("domain", {})
         xr = domain.get("x_range")
         yr = domain.get("y_range")
-        if xr and yr:
-            lines.append(f"  ✅ 模型范围: {xr[0]:.0f}~{xr[1]:.0f}m × {yr[0]:.0f}~{yr[1]:.0f}m")
+        if isinstance(xr, (list, tuple)) and len(xr) >= 2 and isinstance(yr, (list, tuple)) and len(yr) >= 2:
+            try:
+                lines.append(f"  ✅ 模型范围: {float(xr[0]):.0f}~{float(xr[1]):.0f}m × {float(yr[0]):.0f}~{float(yr[1]):.0f}m")
+            except (TypeError, ValueError):
+                lines.append(f"  ⚠️ 模型范围: 数值格式异常")
         else:
             lines.append(f"  ⚠️ 模型范围: 未指定")
 
@@ -260,16 +271,20 @@ class DialogueManager:
             lines.append(f"  ✅ 含水层类型: {atype_labels.get(atype, atype)}")
 
         params = aqua.get("parameters", {})
-        if "hk" in params and params["hk"].get("value") is not None:
-            lines.append(f"  ✅ 渗透系数: {params['hk']['value']} {params['hk'].get('unit', 'm/d')}")
+        if isinstance(params, dict):
+            hk_val = params.get("hk", {}) if isinstance(params.get("hk"), dict) else {}
+            if hk_val.get("value") is not None:
+                lines.append(f"  ✅ 渗透系数: {hk_val['value']} {hk_val.get('unit', 'm/d')}")
+            else:
+                lines.append(f"  ⚠️ 渗透系数: 未指定")
         else:
             lines.append(f"  ⚠️ 渗透系数: 未指定")
 
         # 边界
         bcs = ir.get("boundary_conditions", [])
-        if bcs:
-            bc_types = {bc.get("type") for bc in bcs}
-            lines.append(f"  ✅ 边界条件: {len(bcs)} 个 ({', '.join(bc_types)})")
+        if isinstance(bcs, list) and len(bcs) > 0:
+            bc_types = {bc.get("type", "?") for bc in bcs if isinstance(bc, dict)}
+            lines.append(f"  ✅ 边界条件: {len(bcs)} 个 ({', '.join(bc_types) if bc_types else '未知类型'})")
         else:
             lines.append(f"  ⚠️ 边界条件: 未指定")
 
@@ -332,34 +347,188 @@ class DialogueManager:
 
         return "请问以下参数：\n" + "\n".join(questions)
 
-    def _maybe_generate_suggestions(self, p3_params: list) -> dict:
-        """为三级（优化性）缺失参数生成建议值"""
-        if not p3_params:
+    def _maybe_generate_suggestions(self, missing: dict) -> dict:
+        """
+        为所有缺失参数（P1/P2/P3）生成建议值
+
+        优先级：
+        1. 语义数据库查询（基于含水层类型的文献典型值）
+        2. 硬编码默认值（无法从语义库获取的结构性参数）
+        3. 跳过无法自动补全的 P1 参数（如 boundary_conditions、domain range）
+        """
+        if not missing:
             return {}
 
+        p1 = missing.get("priority_1", [])
+        p2 = missing.get("priority_2", [])
+        p3 = missing.get("priority_3", [])
+        all_missing = p1 + p2 + p3
+
+        # 无法自动补全的 P1 参数 — 需要用户明确提供
+        UNFILLABLE_P1 = {
+            "boundary_conditions", "domain.x_range", "domain.y_range",
+            "project.name", "project.model_type", "aquifer.type",
+        }
+
         suggestions = {}
-        for pname in p3_params[:3]:  # 最多生成3个建议
-            clean_name = pname.replace("aquifer.parameters.", "").replace("transport.", "")
-            context = {"aquifer_type": self.state["json_ir"].get("aquifer", {}).get("type", "all")}
-            suggestion = self.sem_db.get_suggested_value(clean_name, context["aquifer_type"], context)
+        aquifer_type = self.state["json_ir"].get("aquifer", {}).get("type", "all")
+
+        for pname in all_missing:
+            # 跳过必须由用户提供的参数
+            if pname in UNFILLABLE_P1:
+                continue
+
+            # 提取参数短名（去掉路径前缀）
+            clean_name = pname.split(".")[-1] if "." in pname else pname
+
+            # 优先查语义库
+            context = {"aquifer_type": aquifer_type}
+            suggestion = self.sem_db.get_suggested_value(clean_name, aquifer_type, context)
             if suggestion and suggestion.get("confidence") != "none":
                 suggestions[pname] = suggestion
+                continue
+
+            # 语义库无数据 → 尝试硬编码默认值
+            hard_default = self._get_hardcoded_default(pname, aquifer_type)
+            if hard_default:
+                suggestions[pname] = hard_default
 
         return suggestions
 
+    def _get_hardcoded_default(self, param_path: str, aquifer_type: str) -> dict:
+        """
+        为无法从语义库获取的参数提供硬编码默认值
+
+        这些默认值基于典型水文地质条件：
+        - 顶板高程 100m（假设地表附近）
+        - 底板高程 50m（50m厚含水层）
+        - 稳态单应力期
+        - 承压/潜水含水层典型储水参数
+        """
+        defaults = {
+            "grid.nrow": {
+                "value": 50, "unit": "",
+                "confidence": "low", "reason": "默认50行（请根据模型范围和精度需求调整）",
+            },
+            "grid.ncol": {
+                "value": 50, "unit": "",
+                "confidence": "low", "reason": "默认50列（请根据模型范围和精度需求调整）",
+            },
+            "grid.top": {
+                "value": 100.0, "unit": "m",
+                "confidence": "low", "reason": "默认顶板高程 100m（可自行修改）",
+            },
+            "grid.bottom": {
+                "value": 50.0, "unit": "m",
+                "confidence": "low", "reason": "默认底板高程 50m（50m厚含水层）",
+            },
+            "stress_periods": {
+                "value": {
+                    "nper": 1, "perlen": 1.0, "steady_state": True,
+                    "period_data": [{"perlen": 1.0, "nstp": 1, "tsmult": 1.0}],
+                },
+                "unit": "",
+                "confidence": "low",
+                "reason": "默认稳态单应力期",
+            },
+            "aquifer.parameters.ss": {
+                "value": 1e-5, "unit": "1/m",
+                "confidence": "medium",
+                "reason": f"{aquifer_type} 含水层典型储水系数",
+            },
+            "aquifer.parameters.sy": {
+                "value": 0.15, "unit": "-",
+                "confidence": "medium",
+                "reason": f"{aquifer_type} 含水层典型给水度",
+            },
+            "aquifer.parameters.vka": {
+                "value": None, "unit": "m/d",
+                "confidence": "low",
+                "reason": "默认取 hk × 0.1（Kh/Kv=10）",
+            },
+            "aquifer.parameters.porosity": {
+                "value": 0.25, "unit": "-",
+                "confidence": "medium",
+                "reason": f"{aquifer_type} 含水层典型孔隙度",
+            },
+        }
+        return defaults.get(param_path)
+
     def apply_all_suggestions(self) -> str:
-        """一键应用所有建议值，更新 JSON IR"""
+        """一键应用所有建议值，更新 JSON IR，并告知无法自动补全的参数"""
         applied = []
         for pname, sinfo in self.state["suggested_values"].items():
-            self._set_ir_param(pname, sinfo["value"], sinfo["unit"], "auto_suggestion")
-            applied.append(f"  • {self._param_display_name(pname)} = {sinfo['value']} {sinfo['unit']}")
+            value = sinfo.get("value")
+            unit = sinfo.get("unit", "")
+
+            # 特殊处理 vka：若无从语义库获取，则根据 hk 自动计算 Kh/Kv=10
+            if pname == "aquifer.parameters.vka" and value is None:
+                hk_val = self._get_ir_value("aquifer.parameters.hk")
+                if hk_val is not None:
+                    value = hk_val * 0.1
+                    sinfo["value"] = value
+                    sinfo["reason"] = f"Kh/Kv=10，由 hk={hk_val} m/d 推算"
+
+            if value is None:
+                continue  # 跳过无法计算的值
+
+            self._set_ir_param(pname, value, unit, "auto_suggestion")
+            applied.append(f"  • {self._param_display_name(pname)} = {value} {unit}")
+
+        # 更新缺失参数状态
+        self.state["suggested_values"] = {}
+        self.state["missing_params"] = self.parser.detect_missing_params(self.state["json_ir"])
+        self._update_phase()
+
+        reply_parts = []
 
         if applied:
-            self.state["suggested_values"] = {}
-            self.state["missing_params"] = self.parser.detect_missing_params(self.state["json_ir"])
-            self._update_phase()
-            return "✅ 已应用以下建议值：\n" + "\n".join(applied)
-        return "当前没有可用的建议值。"
+            reply_parts.append("✅ 已应用以下建议值：\n" + "\n".join(applied))
+
+        # ── 关键：检查补全后仍缺失的参数，生成详细指南 ──
+        remaining_p1 = self.state["missing_params"].get("priority_1", [])
+        remaining_p2 = self.state["missing_params"].get("priority_2", [])
+        remaining_p3 = self.state["missing_params"].get("priority_3", [])
+
+        if remaining_p1 or remaining_p2:
+            guidance = self._generate_unfillable_params_guidance(
+                remaining_p1, remaining_p2, remaining_p3
+            )
+            reply_parts.append(guidance)
+        elif remaining_p3:
+            reply_parts.append(
+                f"\n💡 还有 {len(remaining_p3)} 个可选参数可使用默认值，"
+                f"输入 **使用建议值** 再次补全。"
+            )
+
+        if not applied and not remaining_p1 and not remaining_p2:
+            return "当前没有可用的建议值。"
+
+        return "\n".join(reply_parts)
+
+    def _generate_unfillable_params_guidance(
+        self, p1: list, p2: list, p3: list
+    ) -> str:
+        """为无法自动补全的参数生成详细指南（委托给统一渲染器）"""
+        return "\n---\n## ⚠️ 以下参数需要您手动提供（无法自动补全）\n\n" + \
+            render_missing_params_guidance(p1, p2, p3, format="markdown")
+
+    def _get_ir_value(self, dot_path: str):
+        """从 JSON IR 中通过点路径读取参数值"""
+        ir = self.state["json_ir"]
+        parts = dot_path.split(".")
+        for part in parts:
+            if isinstance(ir, dict):
+                ir = ir.get(part)
+                if ir is None:
+                    return None
+            else:
+                return None
+
+        # 处理 {"value": ..., "unit": ...} 格式
+        if isinstance(ir, dict):
+            return ir.get("value")
+        return ir
 
     def _set_ir_param(self, dot_path: str, value, unit: str = "", source: str = "user_input"):
         """通过点路径设置 JSON IR 中的参数值（如 'aquifer.parameters.hk'）"""
@@ -408,8 +577,14 @@ class DialogueManager:
         domain = ir.get("domain", {})
         xr = domain.get("x_range", [0, 0])
         yr = domain.get("y_range", [0, 0])
-        lines.append(f"**模型范围**: {xr[0]:.0f}~{xr[1]:.0f}m × {yr[0]:.0f}~{yr[1]:.0f}m")
-        lines.append(f"**面积**: {(xr[1]-xr[0])*(yr[1]-yr[0])/1e6:.2f} km²")
+        if isinstance(xr, (list, tuple)) and len(xr) >= 2 and isinstance(yr, (list, tuple)) and len(yr) >= 2:
+            try:
+                lines.append(f"**模型范围**: {float(xr[0]):.0f}~{float(xr[1]):.0f}m × {float(yr[0]):.0f}~{float(yr[1]):.0f}m")
+                lines.append(f"**面积**: {(float(xr[1])-float(xr[0]))*(float(yr[1])-float(yr[0]))/1e6:.2f} km²")
+            except (TypeError, ValueError):
+                lines.append(f"**模型范围**: 数值格式异常")
+        else:
+            lines.append(f"**模型范围**: 未指定")
 
         grid = ir.get("grid", {})
         lines.append(f"**网格**: {grid.get('nrow', '?')}行 × {grid.get('ncol', '?')}列 × {grid.get('nlay', '?')}层")
@@ -419,23 +594,36 @@ class DialogueManager:
         lines.append(f"**含水层**: {atype_map.get(aqua.get('type', ''), '未知')}")
 
         for pname, pinfo in aqua.get("parameters", {}).items():
-            v = pinfo.get("value")
-            u = pinfo.get("unit", "")
+            if isinstance(pinfo, dict):
+                v = pinfo.get("value")
+                u = pinfo.get("unit", "")
+            else:
+                v = pinfo
+                u = ""
             if v is not None:
                 lines.append(f"  - {self._param_display_name(pname)}: {v} {u}")
 
         bcs = ir.get("boundary_conditions", [])
-        lines.append(f"**边界条件**: {len(bcs)} 个")
-        for bc in bcs:
-            lines.append(f"  - {bc.get('type', '?')}: {bc.get('name', '?')}")
+        if isinstance(bcs, list):
+            lines.append(f"**边界条件**: {len(bcs)} 个")
+            for bc in bcs:
+                if isinstance(bc, dict):
+                    lines.append(f"  - {bc.get('type', '?')}: {bc.get('name', '?')}")
+        else:
+            lines.append(f"**边界条件**: 格式异常")
 
         transport = ir.get("transport", {})
         if transport.get("enabled"):
             lines.append(f"**溶质运移**: 已启用")
             for pname, pinfo in transport.get("dispersion", {}).items():
-                v = pinfo.get("value")
+                if isinstance(pinfo, dict):
+                    v = pinfo.get("value")
+                    u = pinfo.get("unit", "")
+                else:
+                    v = pinfo
+                    u = ""
                 if v is not None:
-                    lines.append(f"  - {self._param_display_name(pname)}: {v} {pinfo.get('unit', '')}")
+                    lines.append(f"  - {self._param_display_name(pname)}: {v} {u}")
 
         return "\n".join(lines)
 

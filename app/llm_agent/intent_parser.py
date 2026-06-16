@@ -6,6 +6,7 @@
 """
 
 import json
+import copy
 import logging
 from typing import Optional, Dict, List, Tuple
 
@@ -84,7 +85,7 @@ class IntentParser:
             user_message=user_message, context_info=context_str
         )
         try:
-            result = self.llm.chat_json(prompt)
+            result = self.llm.chat_json(prompt, expect_array=True)
             if isinstance(result, list):
                 return result
             elif isinstance(result, dict) and "entities" in result:
@@ -102,58 +103,201 @@ class IntentParser:
         """
         将提取的实体标准化：模糊匹配术语、统一参数名、转换单位
 
+        处理所有 NER 实体类型：
+        - parameter_name: 参数名+值+单位 → IR 参数路径
+        - parameter_value: 补充值信息
+        - aquifer_type: 含水层类型 → aquifer.type
+        - boundary_type: 边界类型 → 辅助边界条件构建
+        - spatial_range: 空间范围 → 辅助 domain 构建
+        - contaminant: 污染物 → transport.enabled + 污染物名
+        - location: 位置 → 辅助坐标
+        - time_range: 时间 → 辅助应力期
+
         Returns:
-            {"hk": {"value": 15.0, "unit": "m/d", "source": "user_input", "confidence": "high"}, ...}
+            Map of IR dot-path → {value, unit, source, confidence}
+            e.g. {"aquifer.parameters.hk": {value: 15.0, ...}, "aquifer.type": {value: "confined", ...}}
         """
         normalized = {}
 
         for entity in entities:
-            raw_name = entity.get("entity_type", "")
+            etype = entity.get("entity_type", "")
             raw_value = entity.get("value")
             raw_unit = entity.get("unit", "")
+            std_name = (entity.get("standard_name") or "").lower().strip()
 
-            # 只处理参数类型的实体
-            if raw_name not in ("parameter_name", "parameter_value"):
-                continue
+            if etype == "parameter_name":
+                # 标准参数提取: {entity_type: "parameter_name", standard_name: "hk", value: 15.0, unit: "m/d"}
+                name = std_name or str(entity.get("value", "")).lower().strip()
+                if not name:
+                    continue
 
-            name = entity.get("standard_name") or entity.get("value")
-            if not name or not isinstance(name, str):
-                continue
+                # 在语义库中搜索标准参数名
+                matches = self.sem_db.search_term(name)
+                if matches:
+                    matched_name = matches[0]["standard_name"]
+                else:
+                    matched_name = name
 
-            # 在语义库中搜索标准参数名
-            matches = self.sem_db.search_term(name)
-            if matches:
-                std_name = matches[0]["standard_name"]
-            else:
-                std_name = name.lower().strip()
+                # 映射到 IR dot-path
+                ir_path = self._param_to_ir_path(matched_name)
+                if not ir_path:
+                    continue
 
-            # 尝试从实体中提取数值
-            value = entity.get("value")
-            if value is not None and not isinstance(value, (int, float)):
-                try:
-                    value = float(value)
-                except (ValueError, TypeError):
-                    value = None
+                value = entity.get("value")
+                # 跳过字符串类型的参数名（如标准名本身）
+                if isinstance(value, str):
+                    # 尝试从 additional_info 或 context 获取实际数值
+                    extra = entity.get("numeric_value")
+                    if extra is not None:
+                        value = extra
+                    else:
+                        # 字符串值可能是分类值（如 aquifer type = "confined"）
+                        # 保留字符串值，不尝试转换
+                        pass
 
-            # 单位标准化
-            unit = entity.get("unit") or self._infer_unit(std_name)
-            if unit and unit != self._standard_unit(std_name):
-                # 尝试单位换算
-                std_unit = self._standard_unit(std_name)
-                if std_unit and value is not None:
-                    converted = self.sem_db.convert_unit(value, unit, std_unit)
-                    if converted is not None:
-                        value = converted
-                        unit = std_unit
+                if value is not None and not isinstance(value, (int, float)):
+                    try:
+                        value = float(value)
+                    except (ValueError, TypeError):
+                        pass  # 保留字符串值（如分类值）
 
-            normalized[std_name] = {
-                "value": value,
-                "unit": unit or "",
-                "source": "user_input",
-                "confidence": "high" if matches else "medium",
-            }
+                # 单位标准化
+                unit = raw_unit or self._infer_unit(matched_name)
+                if unit and value is not None and isinstance(value, (int, float)):
+                    # 只有用户提供非标准单位时才需要换算
+                    if raw_unit and unit != raw_unit:
+                        converted = self.sem_db.convert_unit(value, raw_unit, unit)
+                        if converted is not None:
+                            value = converted
+
+                normalized[ir_path] = {
+                    "value": value,
+                    "unit": unit or "",
+                    "source": "user_input",
+                    "confidence": "high" if matches else "medium",
+                }
+
+            elif etype == "parameter_value":
+                # 补充数值: {entity_type: "parameter_value", standard_name: "hk", value: 15.0, unit: "m/d"}
+                if not std_name:
+                    continue
+                ir_path = self._param_to_ir_path(std_name)
+                if not ir_path:
+                    continue
+
+                value = raw_value
+                if value is not None and not isinstance(value, (int, float)):
+                    try:
+                        value = float(value)
+                    except (ValueError, TypeError):
+                        continue
+
+                unit = raw_unit or self._infer_unit(std_name)
+                normalized[ir_path] = {
+                    "value": value,
+                    "unit": unit or "",
+                    "source": "user_input",
+                    "confidence": "medium",
+                }
+
+            elif etype == "aquifer_type":
+                # 含水层类型: {entity_type: "aquifer_type", value: "承压", standard_name: "confined"}
+                atype = std_name or str(raw_value).lower().strip() if raw_value else ""
+                if atype in ("confined", "unconfined", "convertible", "承压", "潜水", "非承压", "可转换"):
+                    type_map = {"承压": "confined", "潜水": "unconfined", "非承压": "unconfined", "可转换": "convertible"}
+                    atype = type_map.get(atype, atype)
+                    normalized["aquifer.type"] = {
+                        "value": atype, "unit": "",
+                        "source": "user_input", "confidence": "high",
+                    }
+
+            elif etype == "boundary_type":
+                # 边界类型: {entity_type: "boundary_type", value: "定水头", standard_name: "chd"}
+                btype = std_name or str(raw_value).lower().strip() if raw_value else ""
+                bc_map = {
+                    "chd": "chd", "定水头": "chd", "constant head": "chd",
+                    "ghb": "ghb", "通用水头": "ghb", "general head": "ghb",
+                    "wel": "wel", "井": "wel", "抽水井": "wel", "注水井": "wel", "well": "wel",
+                    "riv": "riv", "河流": "riv", "river": "riv",
+                    "drn": "drn", "排水沟": "drn", "drain": "drn",
+                    "rch": "rch", "补给": "rch", "面状补给": "rch", "recharge": "rch",
+                }
+                mapped = bc_map.get(btype)
+                if mapped:
+                    # 存储为边界条件提示，供 LLM 构建完整边界
+                    normalized["_boundary_hint"] = {
+                        "value": {"type": mapped, "raw_description": str(raw_value)},
+                        "unit": "",
+                        "source": "user_input",
+                        "confidence": "high",
+                    }
+
+            elif etype == "spatial_range":
+                # 空间范围: {entity_type: "spatial_range", standard_name: "x_range", value: [0, 1000]}
+                if isinstance(raw_value, (list, tuple)) and len(raw_value) == 2:
+                    axis = std_name or "x_range"
+                    ir_path = f"domain.{axis}" if axis in ("x_range", "y_range") else None
+                    if ir_path:
+                        normalized[ir_path] = {
+                            "value": list(raw_value), "unit": "m",
+                            "source": "user_input", "confidence": "high",
+                        }
+
+            elif etype == "contaminant":
+                # 污染物: {entity_type: "contaminant", value: "苯", standard_name: "benzene"}
+                normalized["_contaminant"] = {
+                    "value": str(raw_value) if raw_value else "",
+                    "unit": "",
+                    "source": "user_input", "confidence": "medium",
+                }
+                # 同时启用溶质运移
+                normalized["transport.enabled"] = {
+                    "value": True, "unit": "",
+                    "source": "inferred", "confidence": "high",
+                }
 
         return normalized
+
+    def _param_to_ir_path(self, param_name: str) -> str:
+        """将参数短名映射到 JSON IR dot-path"""
+        PARAM_PATH_MAP = {
+            # 含水层参数
+            "hk": "aquifer.parameters.hk",
+            "vka": "aquifer.parameters.vka",
+            "hani": "aquifer.parameters.hani",
+            "sy": "aquifer.parameters.sy",
+            "ss": "aquifer.parameters.ss",
+            "porosity": "aquifer.parameters.porosity",
+            "n": "aquifer.parameters.porosity",
+            # 网格
+            "nrow": "grid.nrow",
+            "ncol": "grid.ncol",
+            "nlay": "grid.nlay",
+            "delr": "grid.delr",
+            "delc": "grid.delc",
+            "top": "grid.top",
+            "bottom": "grid.bottom",
+            # 模型范围
+            "x_range": "domain.x_range",
+            "y_range": "domain.y_range",
+            # 项目
+            "project_name": "project.name",
+            "model_type": "project.model_type",
+            "name": "project.name",
+            # 溶质
+            "al": "transport.dispersion.al",
+            "trpt": "transport.dispersion.trpt",
+            "trpv": "transport.dispersion.trpv",
+            "decay_rate": "transport.reaction.decay.first_order_rate",
+            "kd": "transport.reaction.sorption.kd",
+            # 井/源汇项
+            "pumping_rate": "source_sinks.well.rate",
+            "recharge": "source_sinks.recharge.rate",
+            # 应力期
+            "stress_periods": "stress_periods",
+            "nper": "stress_periods",
+        }
+        return PARAM_PATH_MAP.get(param_name.lower(), f"aquifer.parameters.{param_name.lower()}")
 
     def _infer_unit(self, param_name: str) -> str:
         """推断参数默认单位"""
@@ -163,8 +307,82 @@ class IntentParser:
         return ""
 
     def _standard_unit(self, param_name: str) -> str:
-        """获取标准单位"""
+        """获取标准单位（兼容别名）"""
         return self._infer_unit(param_name)
+
+    # ================================================================
+    # Step 3.5: 直接写入 JSON IR（绕过 LLM，确保参数不丢失）
+    # ================================================================
+
+    def _patch_json_ir(self, json_ir: dict, normalized: dict) -> dict:
+        """
+        将标准化后的参数直接写入 JSON IR
+
+        这是关键的可靠性保证：LLM 的 generate_json_ir 可能丢失参数，
+        但通过此方法直接写入的参数一定会在 IR 中。
+
+        IR 字段分为两类：
+        - 结构字段（直接设值）：project.name, domain.x_range, grid.nrow, aquifer.type 等
+        - 参数字段（包装为 {value, unit, source}）：aquifer.parameters.*, transport.dispersion.* 等
+        """
+        ir = copy.deepcopy(json_ir) if json_ir else {}
+
+        # 结构字段列表（直接设值，不包装）
+        STRUCTURE_FIELDS = {
+            "project.name", "project.model_type",
+            "domain.x_range", "domain.y_range",
+            "grid.nrow", "grid.ncol", "grid.nlay",
+            "aquifer.type",
+            "transport.enabled",
+        }
+
+        for ir_path, param_info in normalized.items():
+            # 跳过特殊提示键（以 _ 开头）
+            if ir_path.startswith("_"):
+                continue
+
+            value = param_info.get("value")
+            unit = param_info.get("unit", "")
+            source = param_info.get("source", "user_input")
+
+            if value is None:
+                continue
+
+            parts = ir_path.split(".")
+            # 导航到目标位置，必要时创建中间节点
+            current = ir
+            for i, part in enumerate(parts[:-1]):
+                if part not in current:
+                    current[part] = {}
+                elif not isinstance(current[part], dict):
+                    current[part] = {}
+                current = current[part]
+
+            final_key = parts[-1]
+
+            if ir_path in STRUCTURE_FIELDS:
+                # 结构字段：直接设值
+                current[final_key] = value
+            elif "parameters" in ir_path or "dispersion" in ir_path or "reaction" in ir_path:
+                # 参数字段：包装为 {value, unit, source}
+                if isinstance(value, dict):
+                    current[final_key] = value
+                else:
+                    current[final_key] = {
+                        "value": value,
+                        "unit": unit,
+                        "source": source,
+                    }
+            else:
+                # 其他字段：按值类型判断
+                if isinstance(value, (list, dict)):
+                    current[final_key] = value
+                elif isinstance(value, bool):
+                    current[final_key] = value
+                else:
+                    current[final_key] = value
+
+        return ir
 
     # ================================================================
     # Step 4: 生成/更新 JSON IR
@@ -175,18 +393,37 @@ class IntentParser:
         user_message: str,
         current_ir: Optional[dict] = None,
         extracted_entities: Optional[List[dict]] = None,
+        normalized_params: Optional[Dict[str, dict]] = None,
     ) -> dict:
-        """调用 LLM 将提取信息合并到 JSON IR"""
+        """调用 LLM 将提取信息合并到 JSON IR（仅处理复杂实体）"""
         current_ir = current_ir or {}
         entities = extracted_entities or self.extract_entities(user_message, current_ir)
+        normalized_params = normalized_params or {}
+
+        # 收集特殊提示（边界条件提示、污染物等）
+        hints_parts = []
+        for key in ("_boundary_hint", "_contaminant"):
+            if key in normalized_params:
+                hints_parts.append(f"{key}: {json.dumps(normalized_params[key], ensure_ascii=False)}")
 
         prompt = IR_GENERATION_PROMPT.format(
             current_json_ir=json.dumps(current_ir, ensure_ascii=False, indent=2),
             extracted_entities=json.dumps(entities, ensure_ascii=False, indent=2),
             user_message=user_message,
         )
+
+        # 如果有边界/污染物提示，追加到 prompt
+        if hints_parts:
+            prompt += f"\n\n## 额外提示（已通过规则直接写入的参数不必重复处理）\n" + "\n".join(hints_parts)
+
+        prompt += "\n\n注意：当前 JSON IR 中已包含通过规则直接写入的参数值，请保留它们不要覆盖。你只需要处理需要复杂结构推理的实体（如边界条件的具体坐标、应力期的时间安排等）。"
+
         try:
-            return self.llm.chat_json(prompt)
+            result = self.llm.chat_json(prompt)
+            if not isinstance(result, dict):
+                logger.warning(f"chat_json 返回了 {type(result).__name__} 而非 dict，回退到 current_ir")
+                return current_ir
+            return result
         except Exception as e:
             logger.error(f"JSON IR生成失败: {e}")
             return current_ir
@@ -229,54 +466,75 @@ class IntentParser:
         missing_p2 = []
         missing_p3 = []
 
+        # 缓存顶层 dict，避免重复 .get() 调用
+        project = json_ir.get("project", {})
+        domain = json_ir.get("domain", {})
+        grid = json_ir.get("grid", {})
+        aquifer = json_ir.get("aquifer", {})
+        aqua_params = aquifer.get("parameters", {})
+        aqua_type = aquifer.get("type", "")
+
         # 检查阻断性参数 (P1)
-        if not json_ir.get("project", {}).get("name"):
+        if not project.get("name"):
             missing_p1.append("project.name")
-        if not json_ir.get("project", {}).get("model_type"):
+        if not project.get("model_type"):
             missing_p1.append("project.model_type")
-        if not json_ir.get("domain", {}).get("x_range"):
+        if not domain.get("x_range"):
             missing_p1.append("domain.x_range")
-        if not json_ir.get("domain", {}).get("y_range"):
+        if not domain.get("y_range"):
             missing_p1.append("domain.y_range")
-        if not json_ir.get("grid", {}).get("nrow"):
+        if not grid.get("nrow"):
             missing_p1.append("grid.nrow")
-        if not json_ir.get("grid", {}).get("ncol"):
+        if not grid.get("ncol"):
             missing_p1.append("grid.ncol")
-        if not json_ir.get("aquifer", {}).get("type"):
+        if not aqua_type:
             missing_p1.append("aquifer.type")
 
-        aqua_params = json_ir.get("aquifer", {}).get("parameters", {})
-        if not aqua_params.get("hk") or aqua_params.get("hk", {}).get("value") is None:
+        if not isinstance(aqua_params, dict):
             missing_p1.append("aquifer.parameters.hk")
-        if not json_ir.get("boundary_conditions"):
+        else:
+            hk_entry = aqua_params.get("hk")
+            if not isinstance(hk_entry, dict) or hk_entry.get("value") is None:
+                missing_p1.append("aquifer.parameters.hk")
+        bcs = json_ir.get("boundary_conditions")
+        if not bcs or not isinstance(bcs, list) or len(bcs) == 0:
             missing_p1.append("boundary_conditions")
 
         # 检查影响性参数 (P2)
-        if not json_ir.get("grid", {}).get("top"):
+        if not grid.get("top"):
             missing_p2.append("grid.top")
-        if not json_ir.get("grid", {}).get("bottom"):
+        if not grid.get("bottom"):
             missing_p2.append("grid.bottom")
         if not json_ir.get("stress_periods"):
             missing_p2.append("stress_periods")
 
-        aug_type = json_ir.get("aquifer", {}).get("type", "")
-        if aug_type in ("unconfined", "convertible"):
-            if not aqua_params.get("sy") or aqua_params.get("sy", {}).get("value") is None:
-                missing_p2.append("aquifer.parameters.sy")
-        else:
-            if not aqua_params.get("ss"):
-                missing_p2.append("aquifer.parameters.ss")
+        if isinstance(aqua_params, dict):
+            if aqua_type in ("unconfined", "convertible"):
+                sy_entry = aqua_params.get("sy")
+                if not isinstance(sy_entry, dict) or sy_entry.get("value") is None:
+                    missing_p2.append("aquifer.parameters.sy")
+            else:
+                ss_entry = aqua_params.get("ss")
+                if not isinstance(ss_entry, dict) or ss_entry.get("value") is None:
+                    missing_p2.append("aquifer.parameters.ss")
 
         # 检查优化性参数 (P3)
-        if not aqua_params.get("porosity"):
-            missing_p3.append("aquifer.parameters.porosity")
-        if not aqua_params.get("vka"):
-            missing_p3.append("aquifer.parameters.vka")
+        if isinstance(aqua_params, dict):
+            por_entry = aqua_params.get("porosity")
+            if not isinstance(por_entry, dict) or por_entry.get("value") is None:
+                missing_p3.append("aquifer.parameters.porosity")
+            vka_entry = aqua_params.get("vka")
+            if not isinstance(vka_entry, dict) or vka_entry.get("value") is None:
+                missing_p3.append("aquifer.parameters.vka")
 
         transport = json_ir.get("transport", {})
         if transport.get("enabled"):
             disp = transport.get("dispersion", {})
-            if not disp.get("al") or disp.get("al", {}).get("value") is None:
+            if isinstance(disp, dict):
+                al_entry = disp.get("al")
+                if not isinstance(al_entry, dict) or al_entry.get("value") is None:
+                    missing_p3.append("transport.dispersion.al")
+            else:
                 missing_p3.append("transport.dispersion.al")
 
         return {
@@ -319,11 +577,25 @@ class IntentParser:
         # Step 2: 实体提取
         entities = self.extract_entities(user_message, current_ir)
 
-        # Step 3: 标准化
+        # Step 3: 标准化 + 直接写入 IR（绕过 LLM，确保参数不丢失）
         normalized = self.normalize_entities(entities)
+        logger.debug(f"标准化参数: {list(normalized.keys())}")
 
-        # Step 4: 生成 JSON IR
-        json_ir = self.generate_json_ir(user_message, current_ir, entities)
+        # ── 关键修复：将可靠提取的参数直接写入 IR ──
+        patched_ir = self._patch_json_ir(current_ir, normalized)
+
+        # Step 4: LLM 辅助 — 处理复杂实体（边界条件结构、应力期等）
+        json_ir = self.generate_json_ir(user_message, patched_ir, entities, normalized)
+
+        # ── 防御 1: LLM 返回空/非dict 则回退 ──
+        if not json_ir or not isinstance(json_ir, dict):
+            logger.warning("LLM 返回的 IR 为空或非dict，回退到直接修补版")
+            json_ir = patched_ir
+
+        # ── 防御 2: 将直接提取的参数重新应用到 LLM 输出之上 ──
+        #   LLM 可能在生成过程中丢弃 patched_ir 中的字段，
+        #   此步骤保证 rule-based 提取的参数 100% 保留。
+        json_ir = self._patch_json_ir(json_ir, normalized)
 
         # Step 5: 缺失参数检测
         missing = self.detect_missing_params(json_ir)

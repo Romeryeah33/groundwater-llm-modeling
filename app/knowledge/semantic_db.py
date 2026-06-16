@@ -7,6 +7,7 @@
 import sqlite3
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict
 
@@ -16,23 +17,36 @@ logger = logging.getLogger(__name__)
 
 
 class SemanticDB:
-    """地下水建模专业语义库"""
+    """
+    地下水建模专业语义库
+
+    线程安全：所有 SQLite 操作通过 _lock 序列化，
+    check_same_thread=False 允许 Gradio worker 线程访问。
+    """
 
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or settings.semantic_db_path
         self._conn: Optional[sqlite3.Connection] = None
+        self._lock = threading.Lock()
 
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.db_path))
+            # check_same_thread=False 允许跨线程访问（Gradio worker threads）
+            self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
         return self._conn
 
     def close(self):
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        with self._lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
+
+    def _execute(self, query: str, params=()):
+        """线程安全的 SQL 执行"""
+        with self._lock:
+            return self.conn.execute(query, params)
 
     # ================================================================
     # 术语查询
@@ -64,12 +78,12 @@ class SemanticDB:
             query += " AND category = ?"
             params.append(category)
 
-        cursor = self.conn.execute(query, params)
+        cursor = self._execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
 
     def get_term_by_name(self, standard_name: str) -> Optional[dict]:
         """按标准参数名精确查询"""
-        cursor = self.conn.execute(
+        cursor = self._execute(
             "SELECT * FROM term_aliases WHERE standard_name = ?",
             (standard_name,)
         )
@@ -78,14 +92,14 @@ class SemanticDB:
 
     def get_required_params(self, model_type: str = "groundwater_flow") -> List[dict]:
         """获取指定模型类型的必选参数列表"""
-        cursor = self.conn.execute(
+        cursor = self._execute(
             "SELECT * FROM term_aliases WHERE required = 1 ORDER BY priority, category"
         )
         return [dict(row) for row in cursor.fetchall()]
 
     def get_params_by_category(self, category: str) -> List[dict]:
         """按类别获取参数列表"""
-        cursor = self.conn.execute(
+        cursor = self._execute(
             "SELECT * FROM term_aliases WHERE category = ? ORDER BY priority",
             (category,)
         )
@@ -101,7 +115,7 @@ class SemanticDB:
 
         Returns: {min_value, max_value, unit, typical_value, reference}
         """
-        cursor = self.conn.execute(
+        cursor = self._execute(
             """SELECT * FROM param_ranges
                WHERE param_name = ? AND (aquifer_type = ? OR aquifer_type = 'all')
                ORDER BY aquifer_type = 'all' LIMIT 1""",
@@ -129,7 +143,7 @@ class SemanticDB:
 
     def get_all_ranges(self) -> List[dict]:
         """获取全部物理取值范围"""
-        cursor = self.conn.execute("SELECT * FROM param_ranges ORDER BY param_name")
+        cursor = self._execute("SELECT * FROM param_ranges ORDER BY param_name")
         return [dict(row) for row in cursor.fetchall()]
 
     # ================================================================
@@ -145,7 +159,7 @@ class SemanticDB:
         """
         if from_unit == to_unit:
             return value
-        cursor = self.conn.execute(
+        cursor = self._execute(
             "SELECT factor FROM unit_conversions WHERE from_unit = ? AND to_unit = ?",
             (from_unit, to_unit)
         )
@@ -153,7 +167,7 @@ class SemanticDB:
         if row:
             return value * row['factor']
         # 尝试反向转换
-        cursor = self.conn.execute(
+        cursor = self._execute(
             "SELECT factor FROM unit_conversions WHERE from_unit = ? AND to_unit = ?",
             (to_unit, from_unit)
         )
@@ -164,7 +178,7 @@ class SemanticDB:
 
     def get_compatible_units(self, unit: str) -> List[str]:
         """获取可换算的单位列表"""
-        cursor = self.conn.execute(
+        cursor = self._execute(
             """SELECT DISTINCT to_unit FROM unit_conversions WHERE from_unit = ?
                UNION
                SELECT DISTINCT from_unit FROM unit_conversions WHERE to_unit = ?""",
@@ -229,9 +243,9 @@ class SemanticDB:
 
     def get_stats(self) -> dict:
         """获取语义库统计信息"""
-        n_terms = self.conn.execute("SELECT COUNT(*) FROM term_aliases").fetchone()[0]
-        n_ranges = self.conn.execute("SELECT COUNT(*) FROM param_ranges").fetchone()[0]
-        n_units = self.conn.execute("SELECT COUNT(*) FROM unit_conversions").fetchone()[0]
+        n_terms = self._execute("SELECT COUNT(*) FROM term_aliases").fetchone()[0]
+        n_ranges = self._execute("SELECT COUNT(*) FROM param_ranges").fetchone()[0]
+        n_units = self._execute("SELECT COUNT(*) FROM unit_conversions").fetchone()[0]
         return {
             'total_terms': n_terms,
             'total_ranges': n_ranges,

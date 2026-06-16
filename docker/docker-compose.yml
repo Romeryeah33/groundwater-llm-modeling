@@ -10,21 +10,24 @@ services:
     image: groundwater-llm-modeling:latest
     container_name: groundwater-llm-frontend
     ports:
-      - "7860:7860"
+      - "127.0.0.1:7860:7860"  # 仅本地 Nginx 可访问
     environment:
       - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
       - LLM_MODEL=${LLM_MODEL:-deepseek/deepseek-chat}
       - LLM_API_KEY=${LLM_API_KEY}
       - LLM_API_BASE=${LLM_API_BASE}
       - GRADIO_PORT=7860
+      - GRADIO_SERVER_NAME=0.0.0.0
+      - GRADIO_ROOT_PATH=${GRADIO_ROOT_PATH:-}
       - PYTHONIOENCODING=utf-8
     volumes:
       - ../data:/app/data
       - ../logs:/app/logs
     restart: unless-stopped
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.gw-modeling.rule=Host(`gw-modeling.local`)"
+    # 以下 labels 用于 Traefik/Caddy 网关（可选）
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.http.routers.gw-modeling.rule=Host(`gw-modeling.local`)"
 
   # FastAPI 后端 (可选，供API调用)
   api:

@@ -107,6 +107,22 @@ NER_EXTRACTION_PROMPT = """从以下用户输入中提取地下水建模相关�
 - 降解速率/λ → decay_rate
 - 半衰期/t1/2 → half_life
 - 抽水量/Q → pumping_rate
+- 模型类型/模拟类型（地下水流/溶质运移/活性传输） → model_type
+- 模型范围/东西向范围 → x_range
+- 南北向范围 → y_range
+- 网格行数 → nrow
+- 网格列数 → ncol
+- 顶板高程 → top
+- 底板高程 → bottom
+
+重要：当用户描述模型类型时（如"地下水流模型"、"溶质运移"），请提取 entity_type="parameter_name", standard_name="model_type"，value 为:
+- 地下水流 → "groundwater_flow"
+- 溶质运移 → "solute_transport"
+- 活性传输 → "reactive_transport"
+
+当用户描述模型范围时（如"范围1000×800米"），请分别提取 x_range 和 y_range:
+- entity_type="spatial_range", standard_name="x_range", value=[0, 1000], unit="m"
+- entity_type="spatial_range", standard_name="y_range", value=[0, 800], unit="m"
 
 {context_info}
 
