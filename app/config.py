@@ -35,7 +35,7 @@ class Settings:
 
     # --- LLM配置 (使用 __post_init__ 从环境变量读取) ---
     llm_provider: str = "deepseek"
-    llm_model: str = "deepseek/deepseek-chat"
+    llm_model: str = "deepseek/deepseek-v4-flash"
     llm_api_key: Optional[str] = None
     llm_api_base: Optional[str] = "https://api.deepseek.com/v1"
     llm_temperature: float = 0.1

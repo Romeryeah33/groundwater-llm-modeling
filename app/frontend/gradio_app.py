@@ -189,10 +189,10 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
     # 防御：确保 json_ir 是 dict
     if not isinstance(json_ir, dict):
         logger.error(f"run_model_handler 收到非dict的 json_ir: {type(json_ir).__name__}")
-        return empty_fig, f"<p style='color:red'>参数数据异常，请重新输入建模需求</p>", empty_fig, empty_fig, empty_fig, None
+        return empty_fig, f"<p style='color:red'>参数数据异常，请重新输入建模需求</p>", empty_fig, empty_fig, empty_fig, None, "# 等待建模...", "# 参数数据异常"
 
     if not json_ir or not json_ir.get("project", {}).get("name"):
-        return empty_fig, "<p>请先在左侧对话区输入建模需求，完成参数补全后再开始建模</p>", empty_fig, empty_fig, empty_fig, None
+        return empty_fig, "<p>请先在左侧对话区输入建模需求，完成参数补全后再开始建模</p>", empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
 
     # ================================================================
     # 建模前缺失参数检测（阻断建模前提醒用户）
@@ -204,21 +204,21 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
 
     if p1_missing or p2_missing:
         warning_html = render_missing_params_guidance(p1_missing, p2_missing, p3_missing, format="html")
-        return empty_fig, warning_html, empty_fig, empty_fig, empty_fig, None
+        return empty_fig, warning_html, empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
 
     try:
         val_result = quick_validate(json_ir)
     except Exception as e:
         logger.error(f"参数校验异常: {e}")
         logger.error(traceback.format_exc())
-        return empty_fig, f"<p style='color:red'>参数校验失败: {e}</p>", empty_fig, empty_fig, empty_fig, None
+        return empty_fig, f"<p style='color:red'>参数校验失败: {e}</p>", empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
 
     if val_result["error_count"] > 0:
         issues = "\n".join(
             f"  {i['param_name']}: {i['description']}"
             for i in val_result["issues"] if i.get("severity") == "error"
         )
-        return empty_fig, f"<p style='color:red'>参数校验发现 {val_result['error_count']} 个错误:</p><pre>{issues}</pre>", empty_fig, empty_fig, empty_fig, None
+        return empty_fig, f"<p style='color:red'>参数校验发现 {val_result['error_count']} 个错误:</p><pre>{issues}</pre>", empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
 
     workspace = settings.workspace_dir / f"run_{sid}" if sid else settings.workspace_dir / "run_default"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -230,7 +230,7 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
         if not result.get("success"):
             error_msg = result.get('error', 'Unknown')
             logger.error(f"模型运行失败: {error_msg}")
-            return empty_fig, f"<p style='color:red'>模型运行失败: {error_msg}</p><p>请检查参数是否合理，或查看后台日志获取详情。</p>", empty_fig, empty_fig, empty_fig, None
+            return empty_fig, f"<p style='color:red'>模型运行失败: {error_msg}</p><p>请检查参数是否合理，或查看后台日志获取详情。</p>", empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
 
         gwf = result.get("gwf")
         gwt = result.get("gwt")
@@ -296,16 +296,125 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
             logger.warning(f"报告生成失败: {e}")
 
         plt.close("all")
-        return head_fig, map_html, plume_fig, process_fig, report_path
+
+        # 生成代码预览
+        code_str = _generate_code_preview(result, json_ir, workspace)
+
+        return head_fig, map_html, plume_fig, process_fig, report_path, code_str
 
     except Exception as e:
         logger.error(f"建模异常: {e}")
         logger.error(traceback.format_exc())
-        return empty_fig, f"<p style='color:red'>建模异常: {e}</p>", empty_fig, empty_fig, empty_fig, None
+        return empty_fig, f"<p style='color:red'>建模异常: {e}</p>", empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
 
-# ============================================================
+def _generate_code_preview(result: dict, json_ir: dict, workspace) -> str:
+    """从建模结果和 JSON IR 生成 FloPy 代码预览"""
+    lines = ["# FloPy MODFLOW 6 自动生成代码",
+             f"# 项目: {json_ir.get('project', {}).get('name', '未命名')}",
+             f"# 工作目录: {workspace}",
+             ""]
+
+    sim = result.get("sim")
+    gwf = result.get("gwf")
+
+    if sim:
+        lines.append("# ===== 模拟对象 =====")
+        lines.append(f"sim = flopy.mf6.MFSimulation(")
+        lines.append(f"    sim_name='{json_ir.get('project', {}).get('name', 'model')}',")
+        lines.append(f"    sim_ws='{workspace}',")
+        lines.append(f"    continue_=False,")
+        lines.append(f")")
+        lines.append("")
+
+    # 网格信息
+    grid = json_ir.get("grid", {})
+    domain = json_ir.get("domain", {})
+    lines.append("# ===== 网格离散 (DIS) =====")
+    nrow = grid.get("nrow", "?")
+    ncol = grid.get("ncol", "?")
+    nlay = grid.get("nlay", 1)
+    delr = grid.get("delr", 20)
+    delc = grid.get("delc", 20)
+    top = grid.get("top", 100)
+    botm = grid.get("bottom", 50)
+
+    if isinstance(delr, dict): delr = delr.get("value", 20)
+    if isinstance(delc, dict): delc = delc.get("value", 20)
+    if isinstance(top, dict): top = top.get("value", 100)
+    if isinstance(botm, dict): botm = botm.get("value", 50)
+
+    lines.append(f"nrow, ncol, nlay = {nrow}, {ncol}, {nlay}")
+    lines.append(f"delr = np.full({ncol}, {delr})  # 行宽")
+    lines.append(f"delc = np.full({nrow}, {delc})  # 列宽")
+    lines.append(f"top = np.full(({nrow}, {ncol}), {top})  # 顶板高程")
+    lines.append(f"botm = np.full(({nlay}, {nrow}, {ncol}), {botm})  # 底板高程")
+    lines.append("")
+    lines.append("dis = flopy.mf6.ModflowGwfdis(")
+    lines.append("    gwf, nrow=nrow, ncol=ncol, nlay=nlay,")
+    lines.append("    delr=delr, delc=delc, top=top, botm=botm")
+    lines.append(")")
+    lines.append("")
+
+    # 含水层参数
+    aqua = json_ir.get("aquifer", {})
+    params = aqua.get("parameters", {}) if isinstance(aqua, dict) else {}
+    lines.append("# ===== 节点属性流 (NPF) =====")
+    hk_val = _extract_val(params.get("hk", {}))
+    lines.append(f"hk = {hk_val}  # 水平渗透系数 m/d")
+    lines.append(f"npf = flopy.mf6.ModflowGwfnpf(gwf, k=hk)")
+    lines.append("")
+
+    # 储水
+    atype = aqua.get("type", "confined") if isinstance(aqua, dict) else "confined"
+    lines.append("# ===== 储水 (STO) =====")
+    if atype == "confined":
+        ss_val = _extract_val(params.get("ss", {}))
+        lines.append(f"ss = {ss_val}  # 储水系数 1/m")
+        lines.append(f"sto = flopy.mf6.ModflowGwfsto(gwf, ss=ss, steady_state={{True}})")
+    else:
+        sy_val = _extract_val(params.get("sy", {}))
+        lines.append(f"sy = {sy_val}  # 给水度")
+        lines.append(f"sto = flopy.mf6.ModflowGwfsto(gwf, sy=sy, steady_state={{True}})")
+    lines.append("")
+
+    # 边界条件
+    bcs = json_ir.get("boundary_conditions", [])
+    if isinstance(bcs, list) and bcs:
+        lines.append("# ===== 边界条件 =====")
+        lines.append(f"# 共 {len(bcs)} 个边界条件:")
+        for bc in bcs:
+            if isinstance(bc, dict):
+                bc_type = bc.get("type", "?")
+                bc_name = bc.get("name", "?")
+                lines.append(f"#   - {bc_type}: {bc_name}")
+        lines.append("")
+
+    # 求解器
+    lines.append("# ===== 求解器 (IMS) =====")
+    lines.append("ims = flopy.mf6.ModflowIms(sim, complexity='simple')")
+    lines.append("")
+    lines.append("# ===== 运行模拟 =====")
+    lines.append("sim.write_simulation()")
+    lines.append("sim.run_simulation()")
+    lines.append("")
+    lines.append("# ===== 读取结果 =====")
+    lines.append("head = gwf.output.head().get_data()")
+    lines.append("budget = gwf.output.budget().get_data()")
+
+    return "\n".join(lines)
+
+
+def _extract_val(param_info) -> str:
+    """从参数dict中提取数值"""
+    if isinstance(param_info, dict):
+        v = param_info.get("value", "?")
+        return str(v) if v is not None else "?"
+    return str(param_info) if param_info is not None else "?"
+
+
+# ================================================================
 # UI
-# ============================================================
+# ================================================================
 
 def create_ui():
     with gr.Blocks(title="Groundwater LLM Modeling") as demo:
@@ -336,10 +445,14 @@ def create_ui():
 
             with gr.Column(scale=3):
                 gr.Markdown("### 📋 参数审查")
-                param_panel = gr.JSON(label="JSON IR", value={}, height=220)
-                phase_text = gr.Textbox(label="会话阶段", value="intake", interactive=False)
-                missing_params = gr.HighlightedText(label="缺失参数", value=[],
-                    color_map={"blocking": "red", "important": "orange", "optional": "green"})
+                param_panel = gr.JSON(label="JSON IR", value={}, height=200)
+                with gr.Row():
+                    phase_text = gr.Textbox(label="会话阶段", value="intake", interactive=False)
+                    missing_params = gr.HighlightedText(label="缺失参数", value=[],
+                        color_map={"blocking": "red", "important": "orange", "optional": "green"})
+                gr.Markdown("### 💻 代码预览")
+                code_preview = gr.Code(label="FloPy 建模代码", language="python", lines=12,
+                    value="# 等待建模...\n# 完成建模后将在此处显示自动生成的 FloPy 代码")
 
         gr.Markdown("---")
         gr.Markdown("### 📊 建模结果")
@@ -372,12 +485,12 @@ def create_ui():
         auto_fill_btn.click(lambda hist, sid: _apply_suggestions_cmd(hist, get_session(sid), sid),
                             [chatbot, sid_state], [chatbot, param_panel, missing_params, phase_text, sid_state])
         run_btn.click(run_model_handler, [param_panel, sid_state],
-                      [head_plot, result_text, plume_plot, process_plot, report_download])
+                      [head_plot, result_text, plume_plot, process_plot, report_download, code_preview])
 
         gr.Markdown("""
         ---
         ### 💡 快速开始
-        > 我要开展一个单层非承压含水层稳态模拟，范围东西1000×南北800米，渗透系数15m/d，西侧定水头100m，东侧定水头95m，南北侧为零流量边界，项目名称为"try"。
+        > 我要开展一个项目名称为try的地下水流模拟工作，该模拟为单层非承压含水层的稳态模拟，模拟范围为东西0-1000m，南北0-800m的矩形范围，地层渗透系数15m/d，边界条件及初始条件为：西侧定水头100m，东侧定水头95m，南北侧为零流量边界。
         """)
 
     return demo

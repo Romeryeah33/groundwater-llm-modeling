@@ -37,7 +37,9 @@ class IntentParser:
     # Step 1: 意图分类
     # ================================================================
 
-    def classify_intent(self, user_message: str) -> str:
+    def classify_intent(
+        self, user_message: str, conversation_history: str = "", current_ir: dict = None
+    ) -> str:
         """
         识别用户意图类型
 
@@ -45,7 +47,12 @@ class IntentParser:
             new_model | modify_param | query | analyze | upload_file |
             confirm | reject | unclear
         """
-        prompt = INTENT_CLASSIFICATION_PROMPT.format(user_message=user_message)
+        ir_summary = self._brief_ir_summary(current_ir or {})
+        prompt = INTENT_CLASSIFICATION_PROMPT.format(
+            user_message=user_message,
+            conversation_history=conversation_history or "（无历史，这是第一轮对话）",
+            current_ir_summary=ir_summary,
+        )
         try:
             result = self.llm.chat(prompt).strip().lower()
             valid_intents = [
@@ -64,12 +71,40 @@ class IntentParser:
             logger.error(f"意图分类失败: {e}")
             return "unclear"
 
+    def _brief_ir_summary(self, ir: dict) -> str:
+        """生成 IR 简要摘要，用于 intent classification 上下文"""
+        if not ir:
+            return "（空，尚无任何参数）"
+        parts = []
+        proj = ir.get("project", {})
+        if proj.get("name"):
+            parts.append(f"项目: {proj['name']}")
+        if proj.get("model_type"):
+            parts.append(f"类型: {proj['model_type']}")
+        domain = ir.get("domain", {})
+        if domain.get("x_range"):
+            parts.append(f"范围X: {domain['x_range']}")
+        if domain.get("y_range"):
+            parts.append(f"范围Y: {domain['y_range']}")
+        aqua = ir.get("aquifer", {})
+        if aqua.get("type"):
+            parts.append(f"含水层: {aqua['type']}")
+        params = aqua.get("parameters", {})
+        if isinstance(params, dict):
+            for k, v in params.items():
+                if isinstance(v, dict) and v.get("value") is not None:
+                    parts.append(f"{k}={v['value']}")
+        bcs = ir.get("boundary_conditions", [])
+        if isinstance(bcs, list) and bcs:
+            parts.append(f"边界: {len(bcs)}个")
+        return "; ".join(parts) if parts else "（仅有框架）"
+
     # ================================================================
     # Step 2: 命名实体识别 (NER) + 参数抽取
     # ================================================================
 
     def extract_entities(
-        self, user_message: str, context_info: dict = None
+        self, user_message: str, context_info: dict = None, conversation_history: str = ""
     ) -> List[dict]:
         """
         提取建模相关的命名实体和参数值
@@ -82,7 +117,9 @@ class IntentParser:
             context_str = f"\n当前已有参数上下文：\n{json.dumps(context_info, ensure_ascii=False, indent=2)}"
 
         prompt = NER_EXTRACTION_PROMPT.format(
-            user_message=user_message, context_info=context_str
+            user_message=user_message,
+            context_info=context_str,
+            conversation_history=conversation_history or "（无历史，这是第一轮对话）",
         )
         try:
             result = self.llm.chat_json(prompt, expect_array=True)
@@ -256,6 +293,79 @@ class IntentParser:
                     "source": "inferred", "confidence": "high",
                 }
 
+            elif etype == "boundary_condition_full":
+                # 完整边界条件: {entity_type: "boundary_condition_full", position: "west", bc_type: "chd", head_value: 100}
+                position = entity.get("position", "").lower().strip()
+                bc_type = entity.get("bc_type", "").lower().strip()
+                head_val = entity.get("head_value")
+                stage_val = entity.get("stage_value")
+                rate_val = entity.get("rate_value")
+
+                if not position or not bc_type:
+                    continue
+
+                # 跳过的零流量边界（MODFLOW 默认行为，无需显式设置）
+                if bc_type == "no_flow":
+                    normalized[f"_no_flow_boundary_{position}"] = {
+                        "value": {"position": position, "type": "no_flow"},
+                        "unit": "", "source": "user_input", "confidence": "high",
+                    }
+                    continue
+
+                # 构建边界条件条目
+                bc_entry = {
+                    "type": bc_type,
+                    "name": f"{position}_boundary",
+                    "position": position,
+                    "parameters": {},
+                    "geometry": {"type": "edge", "position": position},
+                }
+
+                if bc_type == "chd" and head_val is not None:
+                    bc_entry["parameters"]["head"] = {
+                        "value": float(head_val), "unit": entity.get("unit", "m"),
+                        "source": "user_input",
+                    }
+                elif bc_type == "ghb":
+                    if head_val is not None:
+                        bc_entry["parameters"]["head"] = {
+                            "value": float(head_val), "unit": entity.get("unit", "m"),
+                            "source": "user_input",
+                        }
+                    bc_entry["parameters"]["conductance"] = {
+                        "value": entity.get("conductance", 100.0), "unit": "m²/d",
+                        "source": "inferred",
+                    }
+                elif bc_type == "wel":
+                    if rate_val is not None:
+                        bc_entry["parameters"]["rate"] = {
+                            "value": float(rate_val), "unit": entity.get("unit", "m³/d"),
+                            "source": "user_input",
+                        }
+                elif bc_type == "riv":
+                    if stage_val is not None:
+                        bc_entry["parameters"]["stage"] = {
+                            "value": float(stage_val), "unit": entity.get("unit", "m"),
+                            "source": "user_input",
+                        }
+                    bc_entry["parameters"]["conductance"] = {
+                        "value": entity.get("conductance", 100.0), "unit": "m²/d",
+                        "source": "inferred",
+                    }
+                    bc_entry["parameters"]["rbot"] = {
+                        "value": entity.get("rbot", float(stage_val or 0) - 1.0),
+                        "unit": "m", "source": "inferred",
+                    }
+
+                # 使用特殊键 _boundary_entry_N 来避免重复
+                idx = len([k for k in normalized if k.startswith("_boundary_entry_")])
+                normalized[f"_boundary_entry_{idx}"] = {
+                    "value": bc_entry,
+                    "unit": "",
+                    "source": "user_input",
+                    "confidence": "high",
+                }
+
         return normalized
 
     def _param_to_ir_path(self, param_name: str) -> str:
@@ -336,6 +446,15 @@ class IntentParser:
             "transport.enabled",
         }
 
+        # 收集边界条件条目
+        boundary_entries = []
+        for key in sorted(normalized.keys()):
+            if key.startswith("_boundary_entry_"):
+                entry_info = normalized[key]
+                entry = entry_info.get("value")
+                if isinstance(entry, dict):
+                    boundary_entries.append(entry)
+
         for ir_path, param_info in normalized.items():
             # 跳过特殊提示键（以 _ 开头）
             if ir_path.startswith("_"):
@@ -382,7 +501,63 @@ class IntentParser:
                 else:
                     current[final_key] = value
 
+        # 将收集到的边界条目合并到 boundary_conditions 列表
+        if boundary_entries:
+            existing_bcs = ir.get("boundary_conditions", [])
+            if not isinstance(existing_bcs, list):
+                existing_bcs = []
+            # 按位置去重：相同 position 的只保留一个
+            existing_positions = set()
+            clean_bcs = []
+            for bc in existing_bcs:
+                if isinstance(bc, dict):
+                    pos = bc.get("position", bc.get("name", ""))
+                    if pos not in existing_positions:
+                        existing_positions.add(pos)
+                        clean_bcs.append(bc)
+            for entry in boundary_entries:
+                pos = entry.get("position", entry.get("name", ""))
+                if pos not in existing_positions:
+                    existing_positions.add(pos)
+                    clean_bcs.append(entry)
+            ir["boundary_conditions"] = clean_bcs
+
         return ir
+
+    @staticmethod
+    def _is_empty(val) -> bool:
+        """判断值是否为空（None, 空字符串, 空列表, 空dict）"""
+        if val is None:
+            return True
+        if isinstance(val, str) and not val.strip():
+            return True
+        if isinstance(val, (list, dict)) and len(val) == 0:
+            return True
+        return False
+
+    def _merge_ir(self, base: dict, overlay: dict) -> dict:
+        """
+        深度合并：base（累积历史 IR）提供已有值，overlay（LLM 输出）补充新增/空字段。
+
+        规则：
+        - base 中已有非空值 → 优先保留（前轮参数不丢失）
+        - base 中为空值 → overlay 的值可以填入（LLM 可填充空字段）
+        - overlay 中的新字段 → 加入结果
+        - 嵌套 dict → 递归合并
+        """
+        if not isinstance(overlay, dict):
+            return copy.deepcopy(base) if base else {}
+        result = copy.deepcopy(base) if base else {}
+        for key, val in overlay.items():
+            if key not in result:
+                result[key] = copy.deepcopy(val) if isinstance(val, (dict, list)) else val
+            elif isinstance(result[key], dict) and isinstance(val, dict):
+                result[key] = self._merge_ir(result[key], val)
+            elif self._is_empty(result[key]) and not self._is_empty(val):
+                # base 值为空，overlay 有值 → 接受 overlay
+                result[key] = copy.deepcopy(val) if isinstance(val, (dict, list)) else val
+            # 否则保留 base 的非空值（不覆盖）
+        return result
 
     # ================================================================
     # Step 4: 生成/更新 JSON IR
@@ -394,6 +569,7 @@ class IntentParser:
         current_ir: Optional[dict] = None,
         extracted_entities: Optional[List[dict]] = None,
         normalized_params: Optional[Dict[str, dict]] = None,
+        conversation_history: str = "",
     ) -> dict:
         """调用 LLM 将提取信息合并到 JSON IR（仅处理复杂实体）"""
         current_ir = current_ir or {}
@@ -407,6 +583,7 @@ class IntentParser:
                 hints_parts.append(f"{key}: {json.dumps(normalized_params[key], ensure_ascii=False)}")
 
         prompt = IR_GENERATION_PROMPT.format(
+            conversation_history=conversation_history or "（无历史，这是第一轮对话）",
             current_json_ir=json.dumps(current_ir, ensure_ascii=False, indent=2),
             extracted_entities=json.dumps(entities, ensure_ascii=False, indent=2),
             user_message=user_message,
@@ -416,7 +593,7 @@ class IntentParser:
         if hints_parts:
             prompt += f"\n\n## 额外提示（已通过规则直接写入的参数不必重复处理）\n" + "\n".join(hints_parts)
 
-        prompt += "\n\n注意：当前 JSON IR 中已包含通过规则直接写入的参数值，请保留它们不要覆盖。你只需要处理需要复杂结构推理的实体（如边界条件的具体坐标、应力期的时间安排等）。"
+        prompt += "\n\n注意：当前 JSON IR 中已包含通过规则直接写入的参数值，请保留它们不要覆盖。你只需要处理需要复杂结构推理的实体（如应力期的时间安排等）。"
 
         try:
             result = self.llm.chat_json(prompt)
@@ -548,7 +725,8 @@ class IntentParser:
     # ================================================================
 
     def parse(
-        self, user_message: str, current_ir: Optional[dict] = None, session_context: dict = None
+        self, user_message: str, current_ir: Optional[dict] = None,
+        session_context: dict = None, conversation_history: str = "",
     ) -> dict:
         """
         完整意图解析管道
@@ -557,6 +735,7 @@ class IntentParser:
             user_message: 用户输入文本
             current_ir: 当前累积的 JSON IR
             session_context: 会话上下文（已答参数、对话历史等）
+            conversation_history: 格式化的对话历史文本
 
         Returns:
             {
@@ -570,12 +749,12 @@ class IntentParser:
         current_ir = current_ir or {}
         session_context = session_context or {}
 
-        # Step 1: 意图分类
-        intent = self.classify_intent(user_message)
+        # Step 1: 意图分类（带上下文）
+        intent = self.classify_intent(user_message, conversation_history, current_ir)
         logger.info(f"意图分类: {intent}")
 
-        # Step 2: 实体提取
-        entities = self.extract_entities(user_message, current_ir)
+        # Step 2: 实体提取（带对话历史）
+        entities = self.extract_entities(user_message, current_ir, conversation_history)
 
         # Step 3: 标准化 + 直接写入 IR（绕过 LLM，确保参数不丢失）
         normalized = self.normalize_entities(entities)
@@ -584,8 +763,10 @@ class IntentParser:
         # ── 关键修复：将可靠提取的参数直接写入 IR ──
         patched_ir = self._patch_json_ir(current_ir, normalized)
 
-        # Step 4: LLM 辅助 — 处理复杂实体（边界条件结构、应力期等）
-        json_ir = self.generate_json_ir(user_message, patched_ir, entities, normalized)
+        # Step 4: LLM 辅助 — 处理复杂实体（应力期等），带对话历史
+        json_ir = self.generate_json_ir(
+            user_message, patched_ir, entities, normalized, conversation_history
+        )
 
         # ── 防御 1: LLM 返回空/非dict 则回退 ──
         if not json_ir or not isinstance(json_ir, dict):
@@ -593,9 +774,12 @@ class IntentParser:
             json_ir = patched_ir
 
         # ── 防御 2: 将直接提取的参数重新应用到 LLM 输出之上 ──
-        #   LLM 可能在生成过程中丢弃 patched_ir 中的字段，
-        #   此步骤保证 rule-based 提取的参数 100% 保留。
         json_ir = self._patch_json_ir(json_ir, normalized)
+
+        # ── 防御 3: 深度合并 — 确保前几轮累积的所有参数不丢失 ──
+        #   LLM 可能生成不完整的 IR（遗漏前轮已设定的字段），
+        #   将 patched_ir（累积所有历史参数）作为底版，LLM 输出仅用于新增字段。
+        json_ir = self._merge_ir(patched_ir, json_ir)
 
         # Step 5: 缺失参数检测
         missing = self.detect_missing_params(json_ir)

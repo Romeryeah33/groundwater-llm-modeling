@@ -76,11 +76,13 @@ class DialogueManager:
         # 记录用户消息
         self.state["history"].append({"role": "user", "content": user_message})
 
-        # Step 1: 意图解析
+        # Step 1: 意图解析（携带对话历史，让 LLM 理解上下文）
+        conversation_history = self._format_history_for_llm()
         parse_result = self.parser.parse(
             user_message,
             current_ir=self.state["json_ir"],
             session_context={"phase": self.state["phase"]},
+            conversation_history=conversation_history,
         )
 
         intent = parse_result["intent"]
@@ -284,9 +286,26 @@ class DialogueManager:
         bcs = ir.get("boundary_conditions", [])
         if isinstance(bcs, list) and len(bcs) > 0:
             bc_types = {bc.get("type", "?") for bc in bcs if isinstance(bc, dict)}
+            bc_positions = {bc.get("position", bc.get("name", "?")) for bc in bcs if isinstance(bc, dict)}
             lines.append(f"  ✅ 边界条件: {len(bcs)} 个 ({', '.join(bc_types) if bc_types else '未知类型'})")
+            # 检查是否4个侧面都已指定
+            all_sides = {"west", "east", "north", "south"}
+            specified = set()
+            for bc in bcs:
+                if not isinstance(bc, dict):
+                    continue
+                pos = (bc.get("position", "") or "").lower()
+                name = (bc.get("name", "") or "").lower()
+                for side in all_sides:
+                    if side in pos or side in name:
+                        specified.add(side)
+            unspecified = all_sides - specified
+            if unspecified:
+                cn_map = {"west": "西", "east": "东", "north": "北", "south": "南"}
+                cn_sides = [cn_map.get(s, s) for s in sorted(unspecified)]
+                lines.append(f"     💡 未指定的{'/'.join(cn_sides)}侧默认为零流量边界（MODFLOW默认）")
         else:
-            lines.append(f"  ⚠️ 边界条件: 未指定")
+            lines.append(f"  ⚠️ 边界条件: 未指定（未指定侧默认零流量，但至少需要一个驱动边界）")
 
         # 溶质
         transport = ir.get("transport", {})
@@ -557,13 +576,34 @@ class DialogueManager:
         return clean
 
     def _build_context_str(self) -> str:
-        """构建对话上下文字符串"""
+        """构建对话上下文字符串（用于问题生成等场景）"""
         recent = self.state["history"][-6:]  # 最近3轮
         lines = []
         for msg in recent:
             role = "用户" if msg["role"] == "user" else "系统"
             content = str(msg.get("content", ""))[:200]
             lines.append(f"{role}: {content}")
+        return "\n".join(lines)
+
+    def _format_history_for_llm(self) -> str:
+        """
+        格式化对话历史，用于传递给 LLM 的 prompt
+
+        包含完整的历史消息（最近10轮），不截断到200字符，
+        让 LLM 能真正理解对话上下文。
+        """
+        history = self.state.get("history", [])
+        if not history:
+            return "（这是对话的第一轮，没有历史记录）"
+
+        # 取最近10轮（20条消息），足够覆盖大部分上下文
+        recent = history[-20:]
+        lines = [f"共 {len(history)} 条历史消息，以下是最近 {len(recent)} 条："]
+        for i, msg in enumerate(recent):
+            role = "👤用户" if msg["role"] == "user" else "🤖系统"
+            content = str(msg.get("content", ""))
+            # 不截断内容，让 LLM 看到完整上下文
+            lines.append(f"[{i+1}] {role}: {content}")
         return "\n".join(lines)
 
     def _generate_model_summary(self) -> str:

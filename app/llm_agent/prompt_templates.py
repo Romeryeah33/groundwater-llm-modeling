@@ -71,8 +71,16 @@ SYSTEM_PROMPT = """你是一个地下水数值模拟专家助手（Groundwater M
 # Layer 2: 任务级 Prompts
 # ================================================================
 
-INTENT_CLASSIFICATION_PROMPT = """分析以下用户输入，判断用户的意图类型。
-用户输入：{user_message}
+INTENT_CLASSIFICATION_PROMPT = """分析以下对话，判断用户最新输入的意图类型。
+
+## 对话历史（最近几轮，用于理解上下文）
+{conversation_history}
+
+## 用户当前输入
+{user_message}
+
+## 当前已有参数（JSON IR 摘要）
+{current_ir_summary}
 
 请从以下类别中选择最匹配的一个：
 - new_model: 用户想创建新的地下水模型
@@ -86,9 +94,15 @@ INTENT_CLASSIFICATION_PROMPT = """分析以下用户输入，判断用户的意�
 
 只回复一个类别标签，不要加任何解释。"""
 
-NER_EXTRACTION_PROMPT = """从以下用户输入中提取地下水建模相关的命名实体和参数值。
+NER_EXTRACTION_PROMPT = """从以下对话中提取地下水建模相关的命名实体和参数值。
 
-用户输入：{user_message}
+## 对话历史（最近几轮，非常重要！之前用户已经说过的参数这里可能不再重复）
+{conversation_history}
+
+## 用户当前输入
+{user_message}
+
+{context_info}
 
 请提取以下类型的实体，返回 JSON 数组：
 [
@@ -96,7 +110,7 @@ NER_EXTRACTION_PROMPT = """从以下用户输入中提取地下水建模相关�
   ...
 ]
 
-支持的实体类型：parameter_name（参数名）, parameter_value（数值）, unit（单位）, spatial_range（空间范围）, location（位置）, aquifer_type（含水层类型）, boundary_type（边界类型）, contaminant（污染物名称）, time_range（时间范围）
+支持的实体类型：parameter_name（参数名）, parameter_value（数值）, unit（单位）, spatial_range（空间范围）, location（位置）, aquifer_type（含水层类型）, boundary_type（边界类型）, contaminant（污染物名称）, time_range（时间范围）, boundary_condition_full（完整边界条件）
 
 如果用户提到以下内容，请使用对应的标准参数名：
 - 渗透系数/K/导水系数 → hk
@@ -124,27 +138,52 @@ NER_EXTRACTION_PROMPT = """从以下用户输入中提取地下水建模相关�
 - entity_type="spatial_range", standard_name="x_range", value=[0, 1000], unit="m"
 - entity_type="spatial_range", standard_name="y_range", value=[0, 800], unit="m"
 
-{context_info}
+**边界条件提取（非常重要！）**：
+当用户描述边界条件时（如"西侧定水头100m，东侧定水头95m"），每个边界分别提取为一个实体：
+- entity_type="boundary_condition_full"
+- position="边界位置"（west/east/north/south 或 西/东/北/南）
+- bc_type="边界类型"（chd=定水头, ghb=通用水头, wel=井, riv=河流, drn=排水沟）
+- head_value=水头值（如果是定水头边界，提取数值）
+- stage_value=水位值（如果是河流边界）
+- rate_value=流量值（如果是井边界）
+- unit="m"（水头/水位的单位）
+
+示例：
+用户说"西侧定水头100m" →
+{{"entity_type": "boundary_condition_full", "position": "west", "bc_type": "chd", "head_value": 100, "unit": "m"}}
+
+用户说"东侧定水头95m，南北侧为零流量边界" →
+{{"entity_type": "boundary_condition_full", "position": "east", "bc_type": "chd", "head_value": 95, "unit": "m"}},
+{{"entity_type": "boundary_condition_full", "position": "north", "bc_type": "no_flow", "head_value": null}},
+{{"entity_type": "boundary_condition_full", "position": "south", "bc_type": "no_flow", "head_value": null}}
+
+注意：如果用户提到了某侧是"零流量边界"或"隔水边界"，bc_type 设为 "no_flow"。
+
+**对话历史非常重要！** 如果在对话历史中已经提到的参数，用户在当前输入中只是确认或补充，请结合历史一起提取。不要因为当前输入中没有重复就忽略之前提到的参数。
 
 只返回 JSON 数组，不要加任何解释。"""
 
-IR_GENERATION_PROMPT = """根据已提取的参数信息，生成标准 JSON IR。
+IR_GENERATION_PROMPT = """根据对话历史和已提取的参数信息，生成/更新标准 JSON IR。
 
-## 当前已积累的参数
+## 对话历史（理解用户完整意图的关键）
+{conversation_history}
+
+## 当前已积累的参数（前几轮已确认的值，请务必保留！）
 {current_json_ir}
 
-## 新提取的信息
+## 从当前输入新提取的实体
 {extracted_entities}
 
-## 用户原始输入
+## 用户当前输入
 {user_message}
 
-请将新信息合并到 JSON IR 中，覆盖已有字段（保留未被修改的字段）。
-注意：
-1. 确保所有参数值在物理合理范围内
-2. 确保单位已标准化（长度→m，时间→d）
-3. 对于不确定的信息，设置 value: null 并标记 source: "uncertain"
-4. 如果用户提到了污染物或溶质运移，设置 transport.enabled = true
+请将新信息合并到 JSON IR 中。注意：
+1. **务必保留 current_json_ir 中已有的非空值**，只更新或新增用户本轮提到的新参数
+2. 确保所有参数值在物理合理范围内
+3. 确保单位已标准化（长度→m，时间→d）
+4. 对于不确定的信息，设置 value: null 并标记 source: "uncertain"
+5. 如果用户提到了污染物或溶质运移，设置 transport.enabled = true
+6. 边界条件需要构建完整的 boundary_conditions 数组，包括 type、name、参数和位置信息
 
 只返回合并后的完整 JSON IR，不要加任何解释。"""
 
