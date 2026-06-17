@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+
 # Test imports
 from app.llm_agent.prompt_templates import (
     SYSTEM_PROMPT, INTENT_CLASSIFICATION_PROMPT,

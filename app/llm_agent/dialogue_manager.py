@@ -577,7 +577,7 @@ class DialogueManager:
 
     def _build_context_str(self) -> str:
         """构建对话上下文字符串（用于问题生成等场景）"""
-        recent = self.state["history"][-6:]  # 最近3轮
+        recent = self.state["history"][-20:]  # 最近10轮
         lines = []
         for msg in recent:
             role = "用户" if msg["role"] == "user" else "系统"
@@ -596,8 +596,8 @@ class DialogueManager:
         if not history:
             return "（这是对话的第一轮，没有历史记录）"
 
-        # 取最近10轮（20条消息），足够覆盖大部分上下文
-        recent = history[-20:]
+        # 取最近20轮（40条消息），足够覆盖复杂建模场景的完整上下文
+        recent = history[-40:]
         lines = [f"共 {len(history)} 条历史消息，以下是最近 {len(recent)} 条："]
         for i, msg in enumerate(recent):
             role = "👤用户" if msg["role"] == "user" else "🤖系统"

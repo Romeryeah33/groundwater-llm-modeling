@@ -130,13 +130,13 @@ class FloPyModelMapper:
         if vka_v is not None:
             result["vka"] = vka_v
 
-        # 各向异性
+        # 各向异性: hani = Kh/Kv, 因此 Kv = Kh / hani
         hani_v = params.get("hani", {}).get("value")
         if hani_v is not None and vka_v is not None:
-            # hani = Kh/Kv, 如果已独立指定 vka 则使用 vka
+            # 如果已独立指定 vka 则优先使用 vka
             pass
         elif hani_v is not None and hk_v is not None:
-            result["vka"] = hk_v * hani_v
+            result["vka"] = hk_v / hani_v
 
         # STO 包参数
         sy_v = params.get("sy", {}).get("value")
@@ -163,32 +163,52 @@ class FloPyModelMapper:
         从边界名称推断网格边界的 IJ 索引
 
         支持：west/西/left/左, east/东/right/右, north/北/top/上, south/南/bottom/下
+
+        注意：不使用单字符关键词（如 "w"/"e"/"n"/"s"），
+        因为它们会与井名（"well"→含"w"→误判为west）、
+        复合方向（"northeast"→含"east"→误判为east）等产生误匹配。
         """
         name_lower = (bc_name or "").lower()
         nrow = grid.get("nrow", 50)
         ncol = grid.get("ncol", 50)
 
-        west_keywords = ("west", "西", "左", "left", "w", "xmin")
-        east_keywords = ("east", "东", "右", "right", "e", "xmax")
-        north_keywords = ("north", "北", "上", "top", "n", "ymax")
-        south_keywords = ("south", "南", "下", "bottom", "s", "ymin")
+        # 注意：只使用有区分力的关键词，不含单字母匹配
+        # 使用单词边界匹配避免 "northeast" 匹配到 "east" 等问题
+        west_keywords = ("west", "西", "左", "left", "xmin")
+        east_keywords = ("east", "东", "右", "right", "xmax")
+        north_keywords = ("north", "北", "上", "top", "ymax")
+        south_keywords = ("south", "南", "下", "bottom", "ymin")
+
+        # 辅助函数：检查关键词是否作为独立单词出现（而非其他词的子串）
+        def _word_match(text: str, keywords: tuple) -> bool:
+            for kw in keywords:
+                idx = text.find(kw)
+                if idx < 0:
+                    continue
+                # 对中文字符（非ASCII）关键词，使用简单子串匹配
+                # 因为 "西" 应该匹配 "西侧边界"
+                if any(ord(c) > 127 for c in kw):
+                    return True
+                # 对 ASCII 关键词，检查单词边界：
+                # "east" 应匹配 "east_boundary"，但不应匹配 "northeast"
+                before_ok = idx == 0 or not text[idx - 1].isalpha()
+                after_ok = (idx + len(kw) >= len(text)) or not text[idx + len(kw)].isalpha()
+                if before_ok and after_ok:
+                    return True
+            return False
 
         indices = []
 
-        if any(kw in name_lower for kw in west_keywords):
-            # 西边界：第0列，所有行
+        if _word_match(name_lower, west_keywords):
             for r in range(nrow):
                 indices.append({"layer": layer, "row": r, "col": 0, "period": 0})
-        elif any(kw in name_lower for kw in east_keywords):
-            # 东边界：最后一列，所有行
+        elif _word_match(name_lower, east_keywords):
             for r in range(nrow):
                 indices.append({"layer": layer, "row": r, "col": ncol - 1, "period": 0})
-        elif any(kw in name_lower for kw in north_keywords):
-            # 北边界：第0行，所有列
+        elif _word_match(name_lower, north_keywords):
             for c in range(ncol):
                 indices.append({"layer": layer, "row": 0, "col": c, "period": 0})
-        elif any(kw in name_lower for kw in south_keywords):
-            # 南边界：最后一行，所有列
+        elif _word_match(name_lower, south_keywords):
             for c in range(ncol):
                 indices.append({"layer": layer, "row": nrow - 1, "col": c, "period": 0})
 
@@ -292,7 +312,8 @@ class FloPyModelMapper:
                         ])
 
             elif bc_type == "rch":
-                rate = params.get("rate", params.get("rate", {}).get("value", 0.0))
+                raw_r = params.get("rate", 0.0)
+                rate = raw_r.get("value", 0.0) if isinstance(raw_r, dict) else float(raw_r)
                 if rate != 0:
                     # 面状补给使用 Recharge 包（全区域）
                     packages[package_name][0] = rate
@@ -384,13 +405,16 @@ class FloPyModelMapper:
         raw_name = solver.get("name", "pcg").lower()
         mapped_name = self.SOLVER_MAP.get(raw_name, "CG")
 
-        return {
+        result = {
             "name": mapped_name,
             "hclose": params.get("hclose", 1e-4),
-            "rclose": params.get("rclose", 1e-3),
             "max_iter": int(params.get("max_iter", 100)),
             "relax": params.get("relax", 1.0),
         }
+        # rclose 只在用户显式指定时才传递，让 _build_solver 根据 hclose 自动推算
+        if "rclose" in params:
+            result["rclose"] = params["rclose"]
+        return result
 
     # ================================================================
     # 完整映射

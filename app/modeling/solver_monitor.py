@@ -164,9 +164,11 @@ class SolverMonitor:
 
         output_lower = output_text.lower()
 
-        if "did not converge" in output_lower or "failed to converge" in output_lower:
+        if ("did not converge" in output_lower
+                or "failed to converge" in output_lower
+                or ("failed" in output_lower and "converge" in output_lower)):
             return ErrorType.NON_CONVERGENCE
-        elif "dry cell" in output_lower or "cell went dry" in output_lower:
+        elif "dry cell" in output_lower or "went dry" in output_lower:
             return ErrorType.DRY_CELLS
         elif "negative concentration" in output_lower or "conc < 0" in output_lower:
             return ErrorType.NEGATIVE_CONCENTRATION

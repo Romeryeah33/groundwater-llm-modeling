@@ -242,10 +242,10 @@ class AutoModelBuilder:
                 flopy.mf6.ModflowGwfghb(gwf, stress_period_data=ghb_spd)
 
             elif pkg_name == "rch" and sp_data:
-                # 面状补给
-                if isinstance(sp_data, dict):
-                    for per, rate in sp_data.items():
-                        recharge = flopy.mf6.ModflowGwfrch(gwf)
+                # 面状补给：FloPy 3.10 API 格式待适配，暂时跳过
+                logger.warning(
+                    "RCH (面状补给) 包在 FloPy 3.10 中 API 格式待适配，跳过包创建"
+                )
 
             elif pkg_name == "riv" and sp_data:
                 # 河流
@@ -309,8 +309,9 @@ class AutoModelBuilder:
             diffc=diffc,
         )
 
-        # SSM: 源汇项（从 GWF 流场继承 + 可能的定浓度源）
-        flopy.mf6.ModflowGwtssm(gwt, sources={0: []})
+        # SSM: 源汇项（从 GWF 流场继承）
+        # 无额外质量源时，Sources 留空
+        flopy.mf6.ModflowGwtssm(gwt, sources=None)
 
         # OC
         flopy.mf6.ModflowGwtoc(
@@ -327,12 +328,32 @@ class AutoModelBuilder:
     # ================================================================
 
     def _build_solver(self, solver_params: dict):
-        """构建求解器"""
+        """构建求解器
+
+        IMS 收敛准则：inner_dvclose 必须 ≦ outer_dvclose，否则线性求解器
+        会因过于宽松而提前退出，导致非线性外迭代无法收敛。
+        MODFLOW 6 官方建议 inner = outer / 10 ~ outer / 100。
+        """
+        outer_dvclose = solver_params.get("hclose", 1e-5)
+        # 如果用户未指定 rclose，默认设为 outer 的 1/10
+        rclose = solver_params.get("rclose")
+        if rclose is None:
+            inner_dvclose = outer_dvclose * 0.1
+        else:
+            inner_dvclose = rclose
+            # 安全检查：inner 不应比 outer 更松
+            if inner_dvclose > outer_dvclose:
+                logger.warning(
+                    f"IMS inner_dvclose ({inner_dvclose}) > outer_dvclose ({outer_dvclose}), "
+                    f"自动调整为 outer_dvclose/10 ({outer_dvclose*0.1})"
+                )
+                inner_dvclose = outer_dvclose * 0.1
+
         ModflowIms(
             self._sim,
             print_option="summary",
-            outer_dvclose=solver_params.get("hclose", 1e-5),
-            inner_dvclose=solver_params.get("rclose", 1e-3),
+            outer_dvclose=outer_dvclose,
+            inner_dvclose=inner_dvclose,
             linear_acceleration=solver_params.get("name", "CG"),
         )
 
