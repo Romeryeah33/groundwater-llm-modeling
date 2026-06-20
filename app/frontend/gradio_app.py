@@ -39,6 +39,10 @@ from app.analysis.report_generator import ReportGenerator
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ---- 调试监控器 ----
+from app.utils.debug_monitor import monitor
+logger.info("调试监控器已启用 — 日志: %s", monitor.get_log_file_path())
+
 # ============================================================
 sessions = {}
 
@@ -53,6 +57,7 @@ def get_session(sid: str) -> DialogueManager:
 
 def chat_handler(message: str, history: list, sid: str):
     """处理用户自然语言输入 — Gradio 6 格式"""
+    monitor.step(f"收到用户消息: {message[:60]}...")
     # history is list of {"role": ..., "content": ...} in Gradio 6
     if not message or not message.strip():
         return history, {}, [], "", sid
@@ -72,8 +77,7 @@ def chat_handler(message: str, history: list, sid: str):
     try:
         result = dm.process(message)
     except Exception as e:
-        logger.error(f"处理失败: {e}")
-        logger.error(traceback.format_exc())
+        monitor.capture_error(e, "对话处理")
         reply = f"处理出错: {e}\n请重试或简化描述。"
         history.append({"role": "user", "content": message})
         # 防御：确保 json_ir 是 dict
@@ -178,6 +182,8 @@ def file_parse_handler(files, history):
 
 def run_model_handler(json_ir: dict, sid: str = "default"):
     """运行自动建模"""
+    monitor.step("===== 开始建模 =====")
+    monitor.info(f"项目: {json_ir.get('project', {}).get('name', '?')}")
     # 防御：创建空白占位图
     try:
         empty_fig = plt.figure(figsize=(4, 3))
@@ -189,37 +195,43 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
     # 防御：确保 json_ir 是 dict
     if not isinstance(json_ir, dict):
         logger.error(f"run_model_handler 收到非dict的 json_ir: {type(json_ir).__name__}")
-        return empty_fig, f"<p style='color:red'>参数数据异常，请重新输入建模需求</p>", empty_fig, empty_fig, empty_fig, None, "# 等待建模...", "# 参数数据异常"
+        return empty_fig, f"<p style='color:red'>参数数据异常，请重新输入建模需求</p>", empty_fig, empty_fig, None, "# 参数数据异常", monitor.get_recent_logs(40)
 
     if not json_ir or not json_ir.get("project", {}).get("name"):
-        return empty_fig, "<p>请先在左侧对话区输入建模需求，完成参数补全后再开始建模</p>", empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
+        return empty_fig, "<p>请先在左侧对话区输入建模需求，完成参数补全后再开始建模</p>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 
     # ================================================================
     # 建模前缺失参数检测（阻断建模前提醒用户）
     # ================================================================
+    monitor.step("Step 1/3: 缺失参数检测")
     missing = intent_parser.detect_missing_params(json_ir)
     p1_missing = missing.get("priority_1", [])
     p2_missing = missing.get("priority_2", [])
     p3_missing = missing.get("priority_3", [])
+    monitor.info(f"P1缺失={len(p1_missing)}, P2缺失={len(p2_missing)}, P3缺失={len(p3_missing)}")
 
     if p1_missing or p2_missing:
+        monitor.warn(f"存在关键缺失参数: P1={p1_missing}, P2={p2_missing}")
         warning_html = render_missing_params_guidance(p1_missing, p2_missing, p3_missing, format="html")
-        return empty_fig, warning_html, empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
+        return empty_fig, warning_html, empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 
+    monitor.step("Step 2/3: 物理参数校验")
     try:
         val_result = quick_validate(json_ir)
+        monitor.info(f"校验结果: valid={val_result.get('valid')}, errors={val_result.get('error_count')}, warnings={val_result.get('warning_count')}")
     except Exception as e:
-        logger.error(f"参数校验异常: {e}")
-        logger.error(traceback.format_exc())
-        return empty_fig, f"<p style='color:red'>参数校验失败: {e}</p>", empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
+        monitor.capture_error(e, "物理参数校验")
+        return empty_fig, f"<p style='color:red'>参数校验失败: {e}</p>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 
     if val_result["error_count"] > 0:
         issues = "\n".join(
             f"  {i['param_name']}: {i['description']}"
             for i in val_result["issues"] if i.get("severity") == "error"
         )
-        return empty_fig, f"<p style='color:red'>参数校验发现 {val_result['error_count']} 个错误:</p><pre>{issues}</pre>", empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
+        monitor.warn(f"校验发现 {val_result['error_count']} 个错误")
+        return empty_fig, f"<p style='color:red'>参数校验发现 {val_result['error_count']} 个错误:</p><pre>{issues}</pre>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 
+    monitor.step("Step 3/3: FloPy 建模与 MODFLOW 6 模拟")
     workspace = settings.workspace_dir / f"run_{sid}" if sid else settings.workspace_dir / "run_default"
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -229,9 +241,9 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
 
         if not result.get("success"):
             error_msg = result.get('error', 'Unknown')
+            monitor.error(f"模型运行失败: {error_msg}")
             logger.error(f"模型运行失败: {error_msg}")
-            return empty_fig, f"<p style='color:red'>模型运行失败: {error_msg}</p><p>请检查参数是否合理，或查看后台日志获取详情。</p>", empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
-
+            return empty_fig, f"<p style='color:red'>模型运行失败: {error_msg}</p><p>请检查参数是否合理，或查看后台日志获取详情。</p>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
         gwf = result.get("gwf")
         gwt = result.get("gwt")
         rp = ResultProcessor()
@@ -300,13 +312,12 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
         # 生成代码预览
         code_str = _generate_code_preview(result, json_ir, workspace)
 
-        return head_fig, map_html, plume_fig, process_fig, report_path, code_str
+        monitor.ok("建模完成")
+        return head_fig, map_html, plume_fig, process_fig, report_path, code_str, monitor.get_recent_logs(40)
 
     except Exception as e:
-        logger.error(f"建模异常: {e}")
-        logger.error(traceback.format_exc())
-        return empty_fig, f"<p style='color:red'>建模异常: {e}</p>", empty_fig, empty_fig, empty_fig, None, "# 等待建模..."
-
+        monitor.capture_error(e, "建模执行异常")
+        return empty_fig, f"<p style='color:red'>建模异常: {e}</p>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 def _generate_code_preview(result: dict, json_ir: dict, workspace) -> str:
     """从建模结果和 JSON IR 生成 FloPy 代码预览"""
     lines = ["# FloPy MODFLOW 6 自动生成代码",
@@ -484,8 +495,20 @@ def create_ui():
                         [chatbot, param_panel, missing_params, phase_text, sid_state])
         auto_fill_btn.click(lambda hist, sid: _apply_suggestions_cmd(hist, get_session(sid), sid),
                             [chatbot, sid_state], [chatbot, param_panel, missing_params, phase_text, sid_state])
+
+        # ---- 调试日志面板 ----
+        with gr.Accordion("🔍 调试日志 (点击展开)", open=False):
+            debug_log = gr.Textbox(
+                label=f"实时管道追踪 — 完整日志: {monitor.get_log_file_path()}",
+                value="等待操作...",
+                lines=15,
+                max_lines=25,
+                interactive=False,
+            )
+
+        # 按钮绑定（放在 debug_log 定义之后）
         run_btn.click(run_model_handler, [param_panel, sid_state],
-                      [head_plot, result_text, plume_plot, process_plot, report_download, code_preview])
+                      [head_plot, result_text, plume_plot, process_plot, report_download, code_preview, debug_log])
 
         gr.Markdown("""
         ---

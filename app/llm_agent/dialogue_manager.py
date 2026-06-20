@@ -44,7 +44,7 @@ class DialogueManager:
         """重置对话状态"""
         self.state = {
             "phase": "intake",               # intake | clarification | confirmation | execution | review
-            "json_ir": {},                    # 当前累积的 JSON IR
+            "json_ir": {"ir_version": "1.0"},  # 当前累积的 JSON IR
             "missing_params": {"priority_1": [], "priority_2": [], "priority_3": []},
             "suggested_values": {},           # {param_name: {value, unit, confidence, reason}}
             "answered_params": set(),         # 用户已确认的参数集

@@ -340,9 +340,53 @@ class ParameterRangeConstraint:
         self.sem_db = sem_db or semantic_db
 
     def check_param(
-        self, param_name: str, value: float, aquifer_type: str = "all",
+        self, param_name: str, value, aquifer_type: str = "all",
     ) -> ConstraintResult:
         """检查单个参数值是否在物理合理范围内"""
+
+        # 防御性解包：如果 value 是 {value: ..., unit: ...} 格式则取 value
+        if isinstance(value, dict):
+            value = value.get("value")
+        if value is None:
+            return ConstraintResult(
+                constraint_type="param_range",
+                param_name=param_name,
+                is_valid=True,
+                severity=ConstraintSeverity.INFO,
+                current_value=None,
+                description=f"参数'{param_name}'值为空，跳过检查",
+            )
+        # 安全转换为 float：跳过不可转换的非数值（如 "steady" 等字符串/布尔）
+        if isinstance(value, bool):
+            value = float(value)
+        elif isinstance(value, str):
+            try:
+                value = float(value)
+            except (ValueError, TypeError):
+                import logging
+                logging.getLogger("physics").warning(
+                    f"参数'{param_name}'值为非数值字符串'{value}'，跳过范围检查"
+                )
+                return ConstraintResult(
+                    constraint_type="param_range",
+                    param_name=param_name,
+                    is_valid=True,
+                    severity=ConstraintSeverity.WARNING,
+                    current_value=value,
+                    description=f"参数'{param_name}'值为非数值字符串'{value}'，跳过范围检查（可能是布尔/枚举值）",
+                )
+        else:
+            try:
+                value = float(value)
+            except (ValueError, TypeError):
+                return ConstraintResult(
+                    constraint_type="param_range",
+                    param_name=param_name,
+                    is_valid=True,
+                    severity=ConstraintSeverity.INFO,
+                    current_value=str(value),
+                    description=f"参数'{param_name}'无法转换为数值，跳过范围检查",
+                )
 
         # 优先从语义库查询
         db_range = self.sem_db.get_param_range(param_name, aquifer_type)
@@ -397,37 +441,47 @@ class ParameterRangeConstraint:
         results = []
         aqua_type = json_ir.get("aquifer", {}).get("type", "all")
 
+        def _unwrap(v):
+            """安全解包：如果 v 是 {value: ..., unit: ...} 格式则取 value"""
+            if isinstance(v, dict):
+                return v.get("value")
+            return v
+
         # 遍历 aquifer.parameters
         for pname, pinfo in json_ir.get("aquifer", {}).get("parameters", {}).items():
-            if isinstance(pinfo, dict) and pinfo.get("value") is not None:
-                results.append(self.check_param(pname, pinfo["value"], aqua_type))
+            v = _unwrap(pinfo)
+            if v is not None:
+                results.append(self.check_param(pname, v, aqua_type))
 
         # 遍历 transport.dispersion
         for pname, pinfo in json_ir.get("transport", {}).get("dispersion", {}).items():
-            if isinstance(pinfo, dict) and pinfo.get("value") is not None:
-                results.append(self.check_param(pname, pinfo["value"], aqua_type))
+            v = _unwrap(pinfo)
+            if v is not None:
+                results.append(self.check_param(pname, v, aqua_type))
 
         # 遍历 transport.reaction
         reaction = json_ir.get("transport", {}).get("reaction", {})
         for sub_key in ("decay",):
             sub = reaction.get(sub_key, {})
             for pname in ("first_order_rate", "half_life"):
-                if isinstance(sub.get(pname), dict) and sub[pname].get("value") is not None:
-                    results.append(self.check_param(pname, sub[pname]["value"], aqua_type))
-            if isinstance(reaction.get("kd"), dict) and reaction["kd"].get("value") is not None:
-                results.append(self.check_param("kd", reaction["kd"]["value"], aqua_type))
+                v = _unwrap(sub.get(pname))
+                if v is not None:
+                    results.append(self.check_param(pname, v, aqua_type))
+            v = _unwrap(reaction.get("kd"))
+            if v is not None:
+                results.append(self.check_param("kd", v, aqua_type))
 
         # 检查网格参数
         grid = json_ir.get("grid", {})
         for pname in ("nrow", "ncol", "nlay"):
-            v = grid.get(pname)
+            v = _unwrap(grid.get(pname))
             if v is not None:
                 results.append(self.check_param(pname, v, aqua_type))
 
         # 检查求解器参数
         solver = json_ir.get("solver", {}).get("parameters", {})
         for pname in ("hclose", "max_iter"):
-            v = solver.get(pname)
+            v = _unwrap(solver.get(pname))
             if v is not None:
                 results.append(self.check_param(pname, v, aqua_type))
 
@@ -612,10 +666,15 @@ class NumericalStabilityConstraint:
 
     @staticmethod
     def check_grid_quality(
-        nrow: int, ncol: int, delr: Optional[np.ndarray] = None,
+        nrow, ncol, delr: Optional[np.ndarray] = None,
         delc: Optional[np.ndarray] = None,
     ) -> List[ConstraintResult]:
         """网格质量综合评估"""
+        # 防御性解包
+        if isinstance(nrow, dict): nrow = nrow.get("value")
+        if isinstance(ncol, dict): ncol = ncol.get("value")
+        nrow = int(nrow) if nrow is not None else 0
+        ncol = int(ncol) if ncol is not None else 0
         results = []
 
         # 纵横比检查
