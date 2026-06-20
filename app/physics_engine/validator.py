@@ -179,7 +179,8 @@ class ClosedLoopValidator:
         issues = []
 
         # 检查顶层必需字段
-        required_top = ["ir_version", "project", "domain", "grid", "aquifer"]
+        required_top = ["ir_version", "project", "domain", "aquifer"]
+        optional_autofill = ["grid", "solver", "stress_periods"]
         for field in required_top:
             if field not in json_ir:
                 issues.append(ConstraintResult(
@@ -187,6 +188,14 @@ class ClosedLoopValidator:
                     is_valid=False, severity=ConstraintSeverity.ERROR,
                     description=f"缺少顶层必需字段: {field}",
                     suggestion=f"添加 '{field}' 字段",
+                ))
+        for field in optional_autofill:
+            if field not in json_ir:
+                issues.append(ConstraintResult(
+                    constraint_type="schema", param_name=field,
+                    is_valid=True, severity=ConstraintSeverity.WARNING,
+                    description=f"缺少可选字段: {field}（将由 AutoModelBuilder 自动补全）",
+                    suggestion=f"可手动添加 '{field}' 字段以获得更精确控制",
                 ))
 
         # 检查 project
@@ -240,7 +249,13 @@ class ClosedLoopValidator:
 
         # --- 达西流速检查 ---
         hk = aqua_params.get("hk", {}).get("value")
-        if hk is not None:
+        # 安全转换：跳过非数值的 hk（如 LLM 误填的字符串）
+        if isinstance(hk, str):
+            try:
+                hk = float(hk)
+            except (ValueError, TypeError):
+                hk = None
+        if hk is not None and isinstance(hk, (int, float)) and not isinstance(hk, bool):
             xr = domain.get("x_range", [0, 1])
             yr = domain.get("y_range", [0, 1])
             L = max(xr[1] - xr[0], yr[1] - yr[0], 1)
@@ -300,6 +315,9 @@ class ClosedLoopValidator:
         # --- 含水层厚度检查 ---
         top = grid.get("top")
         bot = grid.get("bottom")
+        # 防御性解包
+        if isinstance(top, dict): top = top.get("value")
+        if isinstance(bot, dict): bot = bot.get("value")
         if top is not None and bot is not None:
             thickness = top - bot
             if thickness <= 0:
@@ -377,6 +395,8 @@ class ClosedLoopValidator:
 
         # Courant 数检查（如果有应力期信息）
         stress = json_ir.get("stress_periods", {})
+        if not isinstance(stress, dict):
+            stress = {}
         period_data = stress.get("period_data", [])
         if period_data:
             aqua = json_ir.get("aquifer", {}).get("parameters", {})

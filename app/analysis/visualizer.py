@@ -19,8 +19,28 @@ import matplotlib
 matplotlib.use("Agg")  # 非交互后端
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+import matplotlib.font_manager as fm
 
 logger = logging.getLogger(__name__)
+
+# ── CJK 中文字体配置 ──
+# Windows: 优先 SimHei（黑体）→ Microsoft YaHei → SimSun → 回退 DejaVu Sans
+_CJK_FONT_CANDIDATES = ["SimHei", "Microsoft YaHei", "SimSun", "WenQuanYi Micro Hei",
+                         "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC"]
+_available_cjk = None
+for _font_name in _CJK_FONT_CANDIDATES:
+    try:
+        fm.findfont(fm.FontProperties(family=_font_name), fallback_to_default=False)
+        _available_cjk = _font_name
+        break
+    except Exception:
+        continue
+
+if _available_cjk:
+    plt.rcParams["font.family"] = _available_cjk
+    logger.info(f"matplotlib CJK 字体已配置: {_available_cjk}")
+else:
+    logger.warning("未找到 CJK 字体，图表中文可能显示为方块。请安装中文字体。")
 
 # 全局样式设置
 plt.rcParams.update({
@@ -29,6 +49,7 @@ plt.rcParams.update({
     "font.size": 10,
     "axes.titlesize": 12,
     "axes.labelsize": 11,
+    "axes.unicode_minus": False,  # 避免负号显示为方块
 })
 
 

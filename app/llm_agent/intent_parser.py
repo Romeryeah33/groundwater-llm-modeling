@@ -437,6 +437,10 @@ class IntentParser:
         """
         ir = copy.deepcopy(json_ir) if json_ir else {}
 
+        # 确保 ir_version 始终存在
+        if "ir_version" not in ir:
+            ir["ir_version"] = "1.0"
+
         # 结构字段列表（直接设值，不包装）
         STRUCTURE_FIELDS = {
             "project.name", "project.model_type",
