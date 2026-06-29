@@ -94,7 +94,7 @@ INTENT_CLASSIFICATION_PROMPT = """分析以下对话，判断用户最新输入�
 
 只回复一个类别标签，不要加任何解释。"""
 
-NER_EXTRACTION_PROMPT = """从以下对话中提取地下水建模相关的命名实体和参数值。
+NER_EXTRACTION_PROMPT = """从以下对话中提取地下水建模相关的命名实体和参数值，并判断用户意图。
 
 ## 对话历史（最近几轮，非常重要！之前用户已经说过的参数这里可能不再重复）
 {conversation_history}
@@ -104,12 +104,19 @@ NER_EXTRACTION_PROMPT = """从以下对话中提取地下水建模相关的命�
 
 {context_info}
 
-请提取以下类型的实体，返回 JSON 数组：
-[
-  {{"entity_type": "parameter_name", "value": "提取到的值", "unit": "单位(如有)", "standard_name": "标准参数名"}},
-  ...
-]
+请返回一个 JSON 对象（不是数组），包含两个字段：
+1. "intent": 意图分类（取值为 new_model | modify_param | query | analyze | upload_file | confirm | reject | unclear）
+2. "entities": 提取的实体数组
 
+意图分类规则：
+- new_model: 用户想创建新的地下水模型（首次提供大量参数）
+- modify_param: 用户想修改已有模型的参数（如"渗透系数改成20"）
+- query: 用户想咨询水文地质知识问题
+- confirm: 用户确认了系统之前的建议（如"好的""同意""可以"）
+- reject: 用户拒绝了系统之前的建议
+- unclear: 意图不明确
+
+实体类型说明（entities 数组中的每个元素）：
 支持的实体类型：parameter_name（参数名）, parameter_value（数值）, unit（单位）, spatial_range（空间范围）, location（位置）, aquifer_type（含水层类型）, boundary_type（边界类型）, contaminant（污染物名称）, time_range（时间范围）, boundary_condition_full（完整边界条件）
 
 如果用户提到以下内容，请使用对应的标准参数名：
@@ -161,7 +168,15 @@ NER_EXTRACTION_PROMPT = """从以下对话中提取地下水建模相关的命�
 
 **对话历史非常重要！** 如果在对话历史中已经提到的参数，用户在当前输入中只是确认或补充，请结合历史一起提取。不要因为当前输入中没有重复就忽略之前提到的参数。
 
-只返回 JSON 数组，不要加任何解释。"""
+**井的位置提取（非常重要！）**：
+当用户描述了井的位置时（如"距离东侧边界300m、南侧边界400m处"），请提取为：
+- entity_type="location"
+- standard_name="well"
+- description="距离东侧边界300m、南侧边界400m"
+- relative_position: {{"reference": "east_boundary", "distance": 300, "unit": "m"}} 和 {{"reference": "south_boundary", "distance": 400, "unit": "m"}}
+
+只返回 JSON 对象（含 intent 和 entities），不要加任何解释。"""
+
 
 IR_GENERATION_PROMPT = """根据对话历史和已提取的参数信息，生成/更新标准 JSON IR。
 
@@ -207,7 +222,6 @@ MISSING_DETECTION_PROMPT = """检查以下 JSON IR 中缺失的关键参数。
 - grid.top, grid.bottom
 - aquifer.parameters.sy (潜水), aquifer.parameters.ss (承压)
 - stress_periods
-- initial conditions
 
 优先级3（优化性 — 有默认值可代用）：
 - aquifer.parameters.porosity

@@ -169,12 +169,15 @@ class ResultProcessor:
         if not (isinstance(records, np.ndarray) and records.dtype.names):
             return
         for field in records.dtype.names:
-            q = np.sum(records[field])
+            try:
+                q = float(np.sum(records[field]))
+            except (TypeError, ValueError):
+                continue
             component = field.replace("_", " ").title()
             if q > 0:
-                inflow[component] = inflow.get(component, 0.0) + float(q)
+                inflow[component] = inflow.get(component, 0.0) + q
             elif q < 0:
-                outflow[component] = outflow.get(component, 0.0) + float(abs(q))
+                outflow[component] = outflow.get(component, 0.0) + abs(q)
 
     # ================================================================
     # 污染羽指标计算
@@ -284,27 +287,32 @@ class ResultProcessor:
         """生成模拟结果汇总"""
         summary = {}
 
+        def _safe_float(v, default=0.0):
+            if isinstance(v, dict): v = v.get("value", default)
+            try: return float(v)
+            except (TypeError, ValueError): return default
+
         # 水头
         try:
             head = self.extract_head_field(gwf, layer=0)
-            summary["head_min"] = float(np.min(head))
-            summary["head_max"] = float(np.max(head))
-            summary["head_mean"] = float(np.mean(head))
+            summary["head_min"] = _safe_float(np.min(head))
+            summary["head_max"] = _safe_float(np.max(head))
+            summary["head_mean"] = _safe_float(np.mean(head))
         except Exception:
             pass
 
         # 水量平衡
         budget = self.extract_water_budget(gwf)
-        summary["water_balance_error"] = budget.get("balance_error")
-        summary["total_flow_in"] = budget.get("total_in")
-        summary["total_flow_out"] = budget.get("total_out")
+        summary["water_balance_error"] = _safe_float(budget.get("balance_error"))
+        summary["total_flow_in"] = _safe_float(budget.get("total_in"))
+        summary["total_flow_out"] = _safe_float(budget.get("total_out"))
 
         # 浓度（如有GWT）
         if gwt is not None:
             try:
                 conc = self.extract_concentration_field(gwt, layer=0)
-                summary["conc_max"] = float(np.max(conc))
-                summary["conc_min"] = float(np.min(conc))
+                summary["conc_max"] = _safe_float(np.max(conc))
+                summary["conc_min"] = _safe_float(np.min(conc))
             except Exception:
                 pass
 

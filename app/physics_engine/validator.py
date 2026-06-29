@@ -44,6 +44,16 @@ class ClosedLoopValidator:
         self.param_range = ParameterRangeConstraint()
         self.unit_check = UnitConsistencyConstraint()
 
+    @staticmethod
+    def _pv(params, key, default=None):
+        """灵活取值：同时兼容裸值和 {"value": X, "unit": ...} 包装格式"""
+        v = params.get(key) if isinstance(params, dict) else None
+        if isinstance(v, dict):
+            return v.get("value", default)
+        if v is not None:
+            return v
+        return default
+
     # ================================================================
     # 主入口：完整校验管道
     # ================================================================
@@ -248,23 +258,19 @@ class ClosedLoopValidator:
         transport = json_ir.get("transport", {})
 
         # --- 达西流速检查 ---
-        hk = aqua_params.get("hk", {}).get("value")
-        # 安全转换：跳过非数值的 hk（如 LLM 误填的字符串）
+        hk = self._pv(aqua_params, "hk")
         if isinstance(hk, str):
-            try:
-                hk = float(hk)
-            except (ValueError, TypeError):
-                hk = None
+            try: hk = float(hk)
+            except (ValueError, TypeError): hk = None
         if hk is not None and isinstance(hk, (int, float)) and not isinstance(hk, bool):
             xr = domain.get("x_range", [0, 1])
             yr = domain.get("y_range", [0, 1])
             L = max(xr[1] - xr[0], yr[1] - yr[0], 1)
 
-            # 估计水力梯度（基于边界条件或默认值）
             bcs = json_ir.get("boundary_conditions", [])
             gradient = self._estimate_gradient(bcs, L)
 
-            n = aqua_params.get("porosity", {}).get("value", 0.25)
+            n = self._pv(aqua_params, "porosity", 0.25)
             issues.append(
                 GoverningEquationConstraint.check_darcy_velocity(hk, gradient, n)
             )
@@ -276,7 +282,7 @@ class ClosedLoopValidator:
 
         # --- 溶质运移参数检查 ---
         if transport.get("enabled"):
-            al = transport.get("dispersion", {}).get("al", {}).get("value")
+            al = self._pv(transport.get("dispersion", {}), "al")
             delr = grid.get("delr")
             # 如果 delr 是数组则取平均
             if isinstance(delr, (list, type(None))) and delr is not None and len(delr) > 0:
@@ -293,8 +299,8 @@ class ClosedLoopValidator:
 
             # 检查溶质运移参数逻辑一致性
             decay = transport.get("reaction", {}).get("decay", {})
-            half_life = decay.get("half_life", {}).get("value")
-            first_order = decay.get("first_order_rate", {}).get("value")
+            half_life = self._pv(decay, "half_life")
+            first_order = self._pv(decay, "first_order_rate")
             if half_life is not None and first_order is not None:
                 # λ = ln(2)/t½
                 expected_rate = math.log(2) / half_life
@@ -342,7 +348,7 @@ class ClosedLoopValidator:
                 ))
 
         # --- 各向异性比检查 ---
-        vka = aqua_params.get("vka", {}).get("value")
+        vka = self._pv(aqua_params, "vka")
         if hk is not None and vka is not None:
             ratio = hk / max(vka, 1e-10)
             if ratio < 1:
@@ -400,8 +406,8 @@ class ClosedLoopValidator:
         period_data = stress.get("period_data", [])
         if period_data:
             aqua = json_ir.get("aquifer", {}).get("parameters", {})
-            hk = aqua.get("hk", {}).get("value", 1.0)
-            n = aqua.get("porosity", {}).get("value", 0.25)
+            hk = self._pv(aqua, "hk", 1.0)
+            n = self._pv(aqua, "porosity", 0.25)
 
             delr = grid.get("delr", 20)
             if isinstance(delr, (list, float)):

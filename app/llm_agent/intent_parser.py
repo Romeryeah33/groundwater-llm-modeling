@@ -105,12 +105,13 @@ class IntentParser:
 
     def extract_entities(
         self, user_message: str, context_info: dict = None, conversation_history: str = ""
-    ) -> List[dict]:
+    ) -> tuple:
         """
-        提取建模相关的命名实体和参数值
+        提取建模相关的命名实体和参数值 + 意图分类（合并为一次 LLM 调用）
 
         Returns:
-            [{"entity_type": "parameter_name", "value": 15.0, "unit": "m/d", "standard_name": "hk"}, ...]
+            (intent: str, entities: list)
+            如 ("new_model", [{"entity_type": "parameter_name", ...}, ...])
         """
         context_str = ""
         if context_info:
@@ -122,15 +123,34 @@ class IntentParser:
             conversation_history=conversation_history or "（无历史，这是第一轮对话）",
         )
         try:
-            result = self.llm.chat_json(prompt, expect_array=True)
-            if isinstance(result, list):
-                return result
-            elif isinstance(result, dict) and "entities" in result:
-                return result["entities"]
-            return []
+            result = self.llm.chat_json(prompt)
+            intent = "unclear"
+            entities = []
+            if isinstance(result, dict):
+                intent = result.get("intent", "unclear")
+                entities = result.get("entities", [])
+            elif isinstance(result, list):
+                # 回退：如果 LLM 仍返回数组
+                entities = result
+            if not isinstance(entities, list):
+                entities = []
+            # 规范化 intent
+            valid_intents = [
+                "new_model", "modify_param", "query", "analyze",
+                "upload_file", "confirm", "reject", "unclear",
+            ]
+            intent_lower = str(intent).strip().lower()
+            if intent_lower in valid_intents:
+                return intent_lower, entities
+            # 模糊匹配
+            for vi in valid_intents:
+                if vi in intent_lower:
+                    return vi, entities
+            logger.warning(f"未知意图: {intent}, 回退为 unclear")
+            return "unclear", entities
         except Exception as e:
             logger.error(f"实体提取失败: {e}")
-            return []
+            return "unclear", []
 
     # ================================================================
     # Step 3: 语义库匹配与标准化
@@ -526,6 +546,67 @@ class IntentParser:
                     clean_bcs.append(entry)
             ir["boundary_conditions"] = clean_bcs
 
+        # 规范化：统一展开 dict 包装值，避免下游收到 {"value": X} 而非裸值
+        ir = IntentParser._normalize_ir(ir)
+
+        return ir
+
+    @staticmethod
+    def _normalize_ir(ir: dict) -> dict:
+        """统一展开 IR 中的 dict 包装值（{"value": X, "unit": ...} → X）
+
+        这是防御 LLM 输出格式不一致的关键步骤。
+        grid、solver、aquifer 参数中所有 dict 包装值都会被展开为裸值。
+        """
+        def _unwrap(v):
+            if isinstance(v, dict) and "value" in v:
+                return v.get("value")
+            return v
+
+        # 展开 grid 中所有数值字段
+        if "grid" in ir and isinstance(ir["grid"], dict):
+            g = ir["grid"]
+            for key in ("nrow", "ncol", "nlay", "delr", "delc", "top", "bottom"):
+                if key in g:
+                    g[key] = _unwrap(g[key])
+
+        # 展开 aquifer.parameters 中所有值
+        if "aquifer" in ir and isinstance(ir["aquifer"], dict):
+            params = ir["aquifer"].get("parameters", {})
+            if isinstance(params, dict):
+                for key, val in params.items():
+                    if isinstance(val, dict) and "value" in val:
+                        params[key] = val["value"]
+
+        # 展开 solver.parameters 中所有值
+        if "solver" in ir and isinstance(ir["solver"], dict):
+            sp = ir["solver"].get("parameters", {})
+            if isinstance(sp, dict):
+                for key, val in sp.items():
+                    if isinstance(val, dict) and "value" in val:
+                        sp[key] = val["value"]
+
+        # 展开 stress_periods（如果是 dict 且有嵌套包装）
+        if "stress_periods" in ir:
+            sp = ir["stress_periods"]
+            if isinstance(sp, dict):
+                for key in ("nper", "perlen", "steady_state"):
+                    if key in sp:
+                        sp[key] = _unwrap(sp[key])
+
+        # 展开 boundary_conditions 中各边界条件的 parameters
+        #   如 {"type":"chd", "parameters":{"head":{"value":100, "unit":"m"}}}
+        #   → {"type":"chd", "parameters":{"head":100}}
+        if "boundary_conditions" in ir:
+            bcs = ir["boundary_conditions"]
+            if isinstance(bcs, list):
+                for bc in bcs:
+                    if isinstance(bc, dict):
+                        bc_params = bc.get("parameters", {})
+                        if isinstance(bc_params, dict):
+                            for key, val in list(bc_params.items()):
+                                bc_params[key] = _unwrap(val)
+
         return ir
 
     @staticmethod
@@ -641,8 +722,37 @@ class IntentParser:
         except Exception:
             return rule_based
 
+    @staticmethod
+    def _has_value(v) -> bool:
+        """判断参数是否有非空值（兼容 dict 包装格式和裸值格式）
+
+        关键：_normalize_ir() 会将 {"value": X, "unit": ...} 展开为裸值 X，
+        此方法同时兼容两种格式，避免归一化后参数被误判为缺失。
+        """
+        if v is None:
+            return False
+        # dict 包装格式：{"value": X, "unit": "...", ...}
+        if isinstance(v, dict):
+            inner = v.get("value")
+            if inner is None:
+                return False
+            if isinstance(inner, str) and not inner.strip():
+                return False
+            return True
+        # 裸值格式：float / int / str / list / dict
+        if isinstance(v, str) and not v.strip():
+            return False
+        if isinstance(v, (list, dict)) and len(v) == 0:
+            return False
+        return True
+
     def _rule_based_missing_check(self, json_ir: dict) -> Dict[str, List[str]]:
-        """基于规则的缺失参数检测（快速路径）"""
+        """基于规则的缺失参数检测（快速路径）
+
+        兼容两种参数格式：
+        - dict 包装：{"value": 15.0, "unit": "m/d", "source": "user_input"}
+        - 裸值（_normalize_ir 后）：15.0
+        """
         missing_p1 = []
         missing_p2 = []
         missing_p3 = []
@@ -664,9 +774,9 @@ class IntentParser:
             missing_p1.append("domain.x_range")
         if not domain.get("y_range"):
             missing_p1.append("domain.y_range")
-        if not grid.get("nrow"):
+        if not self._has_value(grid.get("nrow")):
             missing_p1.append("grid.nrow")
-        if not grid.get("ncol"):
+        if not self._has_value(grid.get("ncol")):
             missing_p1.append("grid.ncol")
         if not aqua_type:
             missing_p1.append("aquifer.type")
@@ -674,46 +784,41 @@ class IntentParser:
         if not isinstance(aqua_params, dict):
             missing_p1.append("aquifer.parameters.hk")
         else:
-            hk_entry = aqua_params.get("hk")
-            if not isinstance(hk_entry, dict) or hk_entry.get("value") is None:
+            if not self._has_value(aqua_params.get("hk")):
                 missing_p1.append("aquifer.parameters.hk")
+
         bcs = json_ir.get("boundary_conditions")
         if not bcs or not isinstance(bcs, list) or len(bcs) == 0:
             missing_p1.append("boundary_conditions")
 
         # 检查影响性参数 (P2)
-        if not grid.get("top"):
+        if not self._has_value(grid.get("top")):
             missing_p2.append("grid.top")
-        if not grid.get("bottom"):
+        if not self._has_value(grid.get("bottom")):
             missing_p2.append("grid.bottom")
         if not json_ir.get("stress_periods"):
             missing_p2.append("stress_periods")
 
         if isinstance(aqua_params, dict):
             if aqua_type in ("unconfined", "convertible"):
-                sy_entry = aqua_params.get("sy")
-                if not isinstance(sy_entry, dict) or sy_entry.get("value") is None:
+                if not self._has_value(aqua_params.get("sy")):
                     missing_p2.append("aquifer.parameters.sy")
             else:
-                ss_entry = aqua_params.get("ss")
-                if not isinstance(ss_entry, dict) or ss_entry.get("value") is None:
+                if not self._has_value(aqua_params.get("ss")):
                     missing_p2.append("aquifer.parameters.ss")
 
         # 检查优化性参数 (P3)
         if isinstance(aqua_params, dict):
-            por_entry = aqua_params.get("porosity")
-            if not isinstance(por_entry, dict) or por_entry.get("value") is None:
+            if not self._has_value(aqua_params.get("porosity")):
                 missing_p3.append("aquifer.parameters.porosity")
-            vka_entry = aqua_params.get("vka")
-            if not isinstance(vka_entry, dict) or vka_entry.get("value") is None:
+            if not self._has_value(aqua_params.get("vka")):
                 missing_p3.append("aquifer.parameters.vka")
 
         transport = json_ir.get("transport", {})
         if transport.get("enabled"):
             disp = transport.get("dispersion", {})
             if isinstance(disp, dict):
-                al_entry = disp.get("al")
-                if not isinstance(al_entry, dict) or al_entry.get("value") is None:
+                if not self._has_value(disp.get("al")):
                     missing_p3.append("transport.dispersion.al")
             else:
                 missing_p3.append("transport.dispersion.al")
@@ -753,12 +858,9 @@ class IntentParser:
         current_ir = current_ir or {}
         session_context = session_context or {}
 
-        # Step 1: 意图分类（带上下文）
-        intent = self.classify_intent(user_message, conversation_history, current_ir)
-        logger.info(f"意图分类: {intent}")
-
-        # Step 2: 实体提取（带对话历史）
-        entities = self.extract_entities(user_message, current_ir, conversation_history)
+        # Step 1+2 合并: 意图分类 + 实体提取（一次 LLM 调用，节省 ~10s）
+        intent, entities = self.extract_entities(user_message, current_ir, conversation_history)
+        logger.info(f"意图分类: {intent}, 提取实体数: {len(entities)}")
 
         # Step 3: 标准化 + 直接写入 IR（绕过 LLM，确保参数不丢失）
         normalized = self.normalize_entities(entities)
@@ -785,8 +887,24 @@ class IntentParser:
         #   将 patched_ir（累积所有历史参数）作为底版，LLM 输出仅用于新增字段。
         json_ir = self._merge_ir(patched_ir, json_ir)
 
-        # Step 5: 缺失参数检测
-        missing = self.detect_missing_params(json_ir)
+        # 最终规范化：确保全部 dict 包装值已展开为裸值
+        json_ir = self._normalize_ir(json_ir)
+
+        # 调试：记录本轮 IR 的关键参数（帮助排查参数保持问题）
+        logger.info(
+            "IR 合并完成: project=%s, model_type=%s, hk=%s, bcs=%d, grid=%s×%s",
+            json_ir.get("project", {}).get("name", "?"),
+            json_ir.get("project", {}).get("model_type", "?"),
+            json_ir.get("aquifer", {}).get("parameters", {}).get("hk", "?"),
+            len(json_ir.get("boundary_conditions", []) or []),
+            json_ir.get("grid", {}).get("nrow", "?"),
+            json_ir.get("grid", {}).get("ncol", "?"),
+        )
+
+        # Step 5: 缺失参数检测（仅使用规则检测，跳过 LLM 检测节省 5-10s）
+        #   注意：LLM 的 detect_missing_params 会将 initial_conditions 误报为缺失，
+        #   规则检测更准确且更快
+        missing = self._rule_based_missing_check(json_ir)
 
         # 判断是否需要澄清
         needs_clarification = (

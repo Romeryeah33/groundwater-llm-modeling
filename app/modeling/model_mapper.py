@@ -121,34 +121,33 @@ class FloPyModelMapper:
             "aquifer_type": aqua.get("type", "confined"),
         }
 
-        # NPF 包参数
-        hk_v = params.get("hk", {}).get("value")
+        # NPF 包参数（使用 _unwrap_value 兼容 dict 包装和裸值）
+        hk_v = self._unwrap_value(params.get("hk"))
         if hk_v is not None:
             result["hk"] = hk_v
 
-        vka_v = params.get("vka", {}).get("value")
+        vka_v = self._unwrap_value(params.get("vka"))
         if vka_v is not None:
             result["vka"] = vka_v
 
         # 各向异性: hani = Kh/Kv, 因此 Kv = Kh / hani
-        hani_v = params.get("hani", {}).get("value")
+        hani_v = self._unwrap_value(params.get("hani"))
         if hani_v is not None and vka_v is not None:
-            # 如果已独立指定 vka 则优先使用 vka
             pass
         elif hani_v is not None and hk_v is not None:
             result["vka"] = hk_v / hani_v
 
         # STO 包参数
-        sy_v = params.get("sy", {}).get("value")
+        sy_v = self._unwrap_value(params.get("sy"))
         if sy_v is not None:
             result["sy"] = sy_v
 
-        ss_v = params.get("ss", {}).get("value")
+        ss_v = self._unwrap_value(params.get("ss"))
         if ss_v is not None:
             result["ss"] = ss_v
 
         # 孔隙度（用于运移）
-        porosity_v = params.get("porosity", {}).get("value")
+        porosity_v = self._unwrap_value(params.get("porosity"))
         if porosity_v is not None:
             result["porosity"] = porosity_v
 
@@ -171,6 +170,9 @@ class FloPyModelMapper:
         name_lower = (bc_name or "").lower()
         nrow = grid.get("nrow", 50)
         ncol = grid.get("ncol", 50)
+        # 防御性解包：LLM 可能返回 {"value": 40} 而非裸 int
+        if isinstance(nrow, dict): nrow = nrow.get("value", 50)
+        if isinstance(ncol, dict): ncol = ncol.get("value", 50)
 
         # 注意：只使用有区分力的关键词，不含单字母匹配
         # 使用单词边界匹配避免 "northeast" 匹配到 "east" 等问题
@@ -225,6 +227,8 @@ class FloPyModelMapper:
         """
         bcs = json_ir.get("boundary_conditions", [])
         stress_periods = json_ir.get("stress_periods", {})
+        if not isinstance(stress_periods, dict):
+            stress_periods = {}
         nper = stress_periods.get("nper", 1)
         grid = json_ir.get("grid", {})
 
@@ -258,7 +262,7 @@ class FloPyModelMapper:
                 # head 可以是 float 或 {"value": float}
                 raw_head = params.get("head", 0.0)
                 if isinstance(raw_head, dict):
-                    head = raw_head.get("value", 0.0)
+                    head = self._unwrap_value(raw_head, 0.0)
                 else:
                     head = float(raw_head)
                 if indices:
@@ -291,8 +295,8 @@ class FloPyModelMapper:
                         ])
                 else:
                     # 井没有位置信息 → 放在模型中心
-                    center_row = grid.get("nrow", 50) // 2
-                    center_col = grid.get("ncol", 50) // 2
+                    center_row = int(self._unwrap_value(grid.get("nrow"), 50)) // 2
+                    center_col = int(self._unwrap_value(grid.get("ncol"), 50)) // 2
                     logger.info(f"井 '{bc.get('name')}' 默认放在中心 ({center_row}, {center_col})")
                     packages[package_name][0] = [
                         [(0, center_row, center_col), rate]
@@ -350,23 +354,23 @@ class FloPyModelMapper:
             "species": transport.get("species", ["contaminant"]),
         }
 
-        al = disp.get("al", {}).get("value")
+        al = disp_unwrap_value(disp.get("al"))
         if al is not None:
             result["al"] = al
 
-        trpt = disp.get("trpt", {}).get("value")
+        trpt = disp_unwrap_value(disp.get("trpt"))
         if trpt is not None:
             result["trpt"] = trpt
         else:
             result["trpt"] = 0.1  # 默认 αTH/αL = 0.1
 
-        trpv = disp.get("trpv", {}).get("value")
+        trpv = disp_unwrap_value(disp.get("trpv"))
         if trpv is not None:
             result["trpv"] = trpv
         else:
             result["trpv"] = 0.01  # 默认 αTV/αL = 0.01
 
-        diffc = disp.get("diffc", {}).get("value")
+        diffc = disp_unwrap_value(disp.get("diffc"))
         if diffc is not None:
             result["diffc"] = diffc
         else:
@@ -376,14 +380,14 @@ class FloPyModelMapper:
         reaction = transport.get("reaction", {})
         if reaction.get("sorption", "none") != "none":
             result["sorption"] = reaction["sorption"]
-            kd = reaction.get("kd", {}).get("value")
+            kd = _unwrap_value(reaction.get("kd"))
             if kd is not None:
                 result["kd"] = kd
 
         decay = reaction.get("decay", {})
         if decay.get("type", "none") != "none":
             result["decay_type"] = decay["type"]
-            rate = decay.get("first_order_rate", {}).get("value")
+            rate = _unwrap_value(decay.get("first_order_rate"))
             if rate is not None:
                 result["decay_rate"] = rate
 
@@ -439,6 +443,8 @@ class FloPyModelMapper:
     def _map_time_params(self, json_ir: dict) -> dict:
         """提取时间离散参数"""
         stress = json_ir.get("stress_periods", {})
+        if not isinstance(stress, dict):
+            stress = {}
         return {
             "nper": stress.get("nper", 1),
             "perlen": stress.get("perlen", 1.0),

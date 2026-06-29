@@ -274,9 +274,16 @@ class DialogueManager:
 
         params = aqua.get("parameters", {})
         if isinstance(params, dict):
-            hk_val = params.get("hk", {}) if isinstance(params.get("hk"), dict) else {}
-            if hk_val.get("value") is not None:
-                lines.append(f"  ✅ 渗透系数: {hk_val['value']} {hk_val.get('unit', 'm/d')}")
+            hk_raw = params.get("hk")
+            # 兼容 dict 包装 {"value": 15, ...} 和裸值 15（_normalize_ir 后）
+            if isinstance(hk_raw, dict):
+                hk_val = hk_raw.get("value")
+                hk_unit = hk_raw.get("unit", "m/d")
+            else:
+                hk_val = hk_raw
+                hk_unit = "m/d"
+            if hk_val is not None:
+                lines.append(f"  ✅ 渗透系数: {hk_val} {hk_unit}")
             else:
                 lines.append(f"  ⚠️ 渗透系数: 未指定")
         else:
@@ -315,7 +322,7 @@ class DialogueManager:
         return "\n".join(lines)
 
     def _generate_questions(self, missing: dict) -> str:
-        """为缺失参数生成引导性问题"""
+        """为缺失参数生成引导性问题（纯规则，快速且不耗 LLM）"""
         p1 = missing.get("priority_1", [])
         p2 = missing.get("priority_2", [])
         p3 = missing.get("priority_3", [])
@@ -323,19 +330,7 @@ class DialogueManager:
         if not p1 and not p2 and not p3:
             return ""
 
-        # 使用 LLM 生成自然问题
-        missing_summary = f"优先级1: {', '.join(p1) if p1 else '无'}\n优先级2: {', '.join(p2) if p2 else '无'}\n优先级3: {', '.join(p3) if p3 else '无'}"
-        context = self._build_context_str()
-
-        try:
-            prompt = QUESTION_GENERATION_PROMPT.format(
-                missing_params_summary=missing_summary,
-                conversation_context=context,
-            )
-            return self.llm.chat(prompt).strip()
-        except Exception as e:
-            logger.warning(f"LLM问题生成失败，使用规则生成: {e}")
-            return self._rule_based_questions(p1, p2, p3)
+        return self._rule_based_questions(p1, p2, p3)
 
     def _rule_based_questions(self, p1: list, p2: list, p3: list) -> str:
         """基于规则生成问题（LLM不可用时的回退）"""
