@@ -399,6 +399,193 @@ class VisualizationEngine:
             fig.savefig(save_path, bbox_inches="tight", dpi=150)
         return fig
 
+    # ================================================================
+    # 底图叠加可视化
+    # ================================================================
+
+    def plot_head_on_basemap(
+        self,
+        head: np.ndarray,
+        delr: np.ndarray,
+        delc: np.ndarray,
+        basemap_path: Optional[str] = None,
+        shp_bounds: Optional[list] = None,
+        shp_path: Optional[str] = None,
+        clip_shp_path: Optional[str] = None,
+        title: str = "Hydraulic Head Distribution",
+        contour_levels: int = 15,
+        save_path: Optional[str] = None,
+    ) -> plt.Figure:
+        """
+        在底图上叠加水头等值线，支持 SHP 边界裁剪。
+
+        Args:
+            head: 二维水头数组 (nrow, ncol)
+            delr/delc: 网格尺寸
+            basemap_path: 底图图片路径 (PNG/JPG/TIF)，可选
+            shp_bounds: [xmin, ymin, xmax, ymax] 用于地理参考底图
+            shp_path: SHP 文件路径（线要素），用于叠加边界线
+            clip_shp_path: SHP 文件路径（面要素），用于裁剪等值线
+            title: 图标题
+            contour_levels: 等值线层数
+            save_path: 保存路径
+        """
+        import matplotlib.image as mpimg
+        import os
+        nrow, ncol = head.shape
+
+        # 模型网格坐标（m）— 使用从 SHP 提取的范围
+        if shp_bounds and len(shp_bounds) >= 4:
+            x_min, y_min, x_max, y_max = shp_bounds[0], shp_bounds[1], shp_bounds[2], shp_bounds[3]
+        else:
+            # 回退：使用 delr/delc 累积坐标
+            x_min, y_min = 0.0, 0.0
+            x_max = sum(delr) if hasattr(delr, '__iter__') else delr * ncol
+            y_max = sum(delc) if hasattr(delc, '__iter__') else delc * nrow
+
+        y_edges = np.linspace(y_min, y_max, nrow + 1)
+        x_edges = np.linspace(x_min, x_max, ncol + 1)
+        X, Y = np.meshgrid(
+            (x_edges[:-1] + x_edges[1:]) / 2,
+            (y_edges[:-1] + y_edges[1:]) / 2,
+        )
+        model_extent = [x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]]
+
+        fig, ax = plt.subplots(figsize=(12, 9))
+
+        # ── 1. 加载底图 ──
+        basemap_loaded = False
+        if basemap_path and os.path.exists(basemap_path):
+            try:
+                ext = os.path.splitext(basemap_path)[1].lower()
+                img = None
+                img_extent = None
+
+                if ext in ('.tif', '.tiff'):
+                    # GeoTIFF: 使用 rasterio 读取并自动获取地理参考
+                    try:
+                        import rasterio
+                        from rasterio.plot import show as rio_show
+                        with rasterio.open(basemap_path) as src:
+                            # 读取 RGB 波段（假设前3个波段为RGB）
+                            n_bands = src.count
+                            if n_bands >= 3:
+                                img_data = src.read([1, 2, 3])
+                                img = np.transpose(img_data, (1, 2, 0))
+                            else:
+                                img_data = src.read(1)
+                                img = img_data
+                            # 地理范围直接从 GeoTIFF 获取
+                            img_extent = [src.bounds.left, src.bounds.right,
+                                         src.bounds.bottom, src.bounds.top]
+                            logger.info(f"GeoTIFF 底图加载成功: {src.width}x{src.height}, "
+                                       f"范围={img_extent}")
+                    except ImportError:
+                        logger.warning("rasterio 未安装，尝试 PIL 读取 GeoTIFF")
+                    except Exception as e:
+                        logger.warning(f"rasterio 读取失败: {e}")
+
+                if img is None:
+                    # 回退：使用 matplotlib/PIL 读取（可能不支持地理参考）
+                    img = mpimg.imread(basemap_path)
+                    # 对于非 GeoTIFF 图片，使用 SHP 范围或模型范围
+                    if img_extent is None:
+                        if shp_bounds and len(shp_bounds) >= 4:
+                            img_extent = [shp_bounds[0], shp_bounds[2],
+                                         shp_bounds[1], shp_bounds[3]]
+                        else:
+                            img_extent = model_extent
+
+                # 显示底图
+                if img is not None:
+                    ax.imshow(img, extent=img_extent or model_extent,
+                             aspect='auto', alpha=0.65, zorder=0, cmap='gray' if img.ndim == 2 else None)
+                    basemap_loaded = True
+                    logger.info(f"底图已加载: {basemap_path}")
+            except Exception as e:
+                logger.warning(f"底图加载失败: {e}")
+
+        # ── 2. 叠加 SHP 边界线（线要素，如 Boundary_arcs） ──
+        if shp_path and os.path.exists(shp_path):
+            try:
+                import geopandas as gpd
+                gdf = gpd.read_file(shp_path)
+                gdf.boundary.plot(ax=ax, edgecolor='red', linewidth=2.0,
+                                  alpha=0.9, zorder=2, label='Boundary Line')
+                logger.info(f"SHP 边界线已叠加: {shp_path} ({len(gdf)} 要素)")
+            except Exception as e:
+                logger.warning(f"SHP 边界线叠加失败: {e}")
+
+        # ── 2b. 加载裁剪面要素（面要素，如 Rivers_polys / Aquifer Layer 1_polys） ──
+        boundary_polygon = None
+        if clip_shp_path and os.path.exists(clip_shp_path):
+            try:
+                import geopandas as gpd
+                gdf = gpd.read_file(clip_shp_path)
+                if len(gdf) > 0:
+                    boundary_polygon = gdf.geometry.iloc[0]
+                # 绘制面边界
+                gdf.boundary.plot(ax=ax, edgecolor='black', linewidth=2.5,
+                                  alpha=0.9, zorder=2, label='Model Domain')
+                logger.info(f"SHP 裁剪面已加载: {clip_shp_path} ({len(gdf)} 要素, geom={boundary_polygon.geom_type if boundary_polygon else 'N/A'})")
+            except Exception as e:
+                logger.warning(f"SHP 裁剪面加载失败: {e}")
+
+        # ── 3. 水头填色（半透明，裁剪到边界） ──
+        # 如果有 SHP 边界多边形，用它来 mask 网格数据
+        masked_head = head
+        if boundary_polygon is not None and hasattr(boundary_polygon, 'contains'):
+            try:
+                from matplotlib.path import Path as MplPath
+                # 将 Shapely 多边形转为 matplotlib Path
+                if boundary_polygon.geom_type == 'Polygon':
+                    xy = np.array(boundary_polygon.exterior.coords)
+                    boundary_path = MplPath(xy)
+                    # 对每个网格单元中心检查是否在边界内
+                    mask = np.ones_like(head, dtype=bool)
+                    for i in range(nrow):
+                        for j in range(ncol):
+                            mask[i, j] = boundary_path.contains_point((X[i, j], Y[i, j]))
+                    masked_head = np.ma.masked_where(~mask, head)
+                    logger.info(f"边界裁剪完成: {mask.sum()}/{mask.size} 个网格单元在边界内")
+            except Exception as e:
+                logger.warning(f"边界裁剪失败: {e}")
+
+        levels = np.linspace(masked_head.min() if hasattr(masked_head, 'min') else head.min(),
+                             masked_head.max() if hasattr(masked_head, 'max') else head.max(),
+                             contour_levels)
+        cf = ax.contourf(X, Y, masked_head, levels=levels, cmap=self.CMAP_HEAD,
+                         alpha=0.5 if basemap_loaded else 0.85, zorder=1)
+        cbar = fig.colorbar(cf, ax=ax, label="Head (m)", shrink=0.85)
+
+        # ── 4. 等值线 ──
+        cs = ax.contour(X, Y, masked_head, levels=10, colors="black",
+                        linewidths=0.5, zorder=3)
+        ax.clabel(cs, inline=True, fontsize=7, fmt="%.1f")
+
+        # ── 5. 流向箭头 ──
+        gy, gx = np.gradient(head)
+        gy = -gy / delc.reshape(-1, 1)
+        gx = -gx / delr.reshape(1, -1)
+        step = max(1, min(nrow, ncol) // 15)
+        ax.quiver(
+            X[::step, ::step], Y[::step, ::step],
+            gx[::step, ::step], gy[::step, ::step],
+            color="darkblue", alpha=0.5, scale=50, width=0.002, zorder=4,
+        )
+
+        # ── 6. 标签和标题 ──
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        ax.set_title(title)
+        ax.set_aspect("equal")
+        if basemap_loaded:
+            ax.legend(loc='upper right', fontsize=8)
+
+        if save_path:
+            fig.savefig(save_path, bbox_inches="tight", dpi=150)
+        return fig
+
 
 # 全局实例
 visualizer = VisualizationEngine()

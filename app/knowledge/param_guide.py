@@ -184,6 +184,69 @@ PARAM_GUIDE = {
         "example": "纵向弥散度为 50 米",
         "why_needed": "控制溶质运移的对流-弥散过程，影响污染羽扩散形态",
     },
+    # ── GHB / 边界参数 ──
+    "ghb_stage": {
+        "display_name_cn": "GHB 边界水头 (stage)",
+        "nature": "通用水头边界 (GHB) 上的参考水头/水位，代表边界外侧水源的水力状态",
+        "priority": "P1（阻断性）— GHB 边界缺少水头值无法计算交换量",
+        "valid_range": "一般 0 ~ 5000 m（海拔高程），应与实际观测水位一致",
+        "format": "浮点数或一维数组（沿弧段线性插值），单位：米 (m)",
+        "unit": "米 (m)",
+        "example": "河流水位为 212 m",
+        "why_needed": "驱动 GHB 边界与含水层之间的水量交换",
+    },
+    "ghb_conductance": {
+        "display_name_cn": "GHB 导水系数 (conductance)",
+        "nature": "通用水头边界的导水系数，控制边界与含水层之间交换速率。Cond = K × L × W / M",
+        "priority": "P2（影响性）— 可使用经验值 1~100 (m²/d)/m",
+        "valid_range": "0.001 ~ 10000 (m²/d)/m；河流边界通常 1~100",
+        "format": "浮点数或一维数组，单位：(m²/d)/m",
+        "unit": "(m²/d)/m",
+        "example": "河流导水系数为 1.0 (m²/d)/m",
+        "why_needed": "控制 GHB 边界的渗透能力，影响交换量大小",
+    },
+    # ── 初始条件 ──
+    "initial_conditions": {
+        "display_name_cn": "初始条件",
+        "nature": "模拟开始时的水头/浓度分布。稳态模拟中仅作为迭代初值；瞬态模拟中为必需初始状态",
+        "priority": "P2（影响性）— 稳态可使用默认值（顶板高程）；瞬态必须提供",
+        "valid_range": "水头：一般 0~5000 m（海拔）；浓度：≥0 mg/L",
+        "format": "浮点数或二维数组。通常设 uniform 值或从文件导入",
+        "unit": "水头: m；浓度: mg/L",
+        "example": "初始水头为 230 m（等于顶板高程）",
+        "why_needed": "稳态模拟的初始解迭代起点；瞬态模拟的历史状态",
+    },
+    # ── 网格 ──
+    "grid.nlay": {
+        "display_name_cn": "网格层数 (nlay)",
+        "nature": "模型的垂向分层数，控制三维结构的复杂程度",
+        "priority": "P3（优化性）— 单层含水层默认 1",
+        "valid_range": "一般 1 ~ 50 层",
+        "format": "整数，如 1",
+        "unit": "无（层数）",
+        "example": "模型为单层含水层",
+        "why_needed": "决定模型在垂向上的离散精度",
+    },
+    "grid.delr": {
+        "display_name_cn": "行宽 (delr)",
+        "nature": "网格沿行方向（通常为东西向）的间距",
+        "priority": "P3（优化性）— 默认按模型宽度/ncol自动计算",
+        "valid_range": "建议 5 ~ 500 m，取决于模型尺度",
+        "format": "浮点数或一维数组，单位：米",
+        "unit": "米 (m)",
+        "example": "网格间距为 20 米",
+        "why_needed": "控制行方向上的空间分辨率",
+    },
+    "grid.delc": {
+        "display_name_cn": "列宽 (delc)",
+        "nature": "网格沿列方向（通常为南北向）的间距",
+        "priority": "P3（优化性）— 默认按模型高度/nrow自动计算",
+        "valid_range": "建议 5 ~ 500 m",
+        "format": "浮点数或一维数组，单位：米",
+        "unit": "米 (m)",
+        "example": "网格间距为 20 米",
+        "why_needed": "控制列方向上的空间分辨率",
+    },
 }
 
 
@@ -211,15 +274,101 @@ def render_missing_params_guidance(p1_missing: list, p2_missing: list, p3_missin
 
 
 def _guide_for(pname: str) -> dict:
-    """获取参数指南（含默认值）"""
-    return PARAM_GUIDE.get(pname, {
+    """获取参数指南（含默认值）。对于未知参数，智能推断元数据。"""
+    if pname in PARAM_GUIDE:
+        return PARAM_GUIDE[pname]
+
+    # ── 智能推断：从参数路径中提取关键词，提供合理的默认指南 ──
+    path_lower = pname.lower()
+
+    # 判断参数类别
+    if "stage" in path_lower or "head" in path_lower:
+        return {
+            "display_name_cn": pname,
+            "nature": "边界上的水头/水位值，定义该位置的水力条件",
+            "valid_range": "一般 0 ~ 5000 m（海拔高程），应根据实际水文资料确定",
+            "format": "浮点数，单位：米 (m)",
+            "unit": "米 (m)",
+            "example": f"请输入{_extract_position(pname)}的水头值，例如 212.0",
+        }
+    if "conductance" in path_lower or "cond" in path_lower:
+        return {
+            "display_name_cn": pname,
+            "nature": "边界的水力传导系数，控制边界与含水层之间的水量交换速率",
+            "valid_range": "一般 0.01 ~ 10000 (m²/d)/m，河流边界通常取 1~100",
+            "format": "浮点数，单位：(m²/d)/m",
+            "unit": "(m²/d)/m",
+            "example": f"请输入{_extract_position(pname)}的导水系数，例如 1.0",
+        }
+    if "rate" in path_lower or "pumping" in path_lower or "flow" in path_lower:
+        return {
+            "display_name_cn": pname,
+            "nature": "井或边界的抽注水速率，正值表示注水，负值表示抽水",
+            "valid_range": "一般 -10000 ~ 10000 m³/d",
+            "format": "浮点数，单位：m³/d",
+            "unit": "m³/d",
+            "example": f"请输入{_extract_position(pname)}的流量，例如 -200",
+        }
+    if "boundary" in path_lower:
+        return {
+            "display_name_cn": pname,
+            "nature": "边界条件参数，定义地下水在模型边界上的行为",
+            "valid_range": "取决于边界类型（水头/流量/导水系数），请参考具体边界的物理含义",
+            "format": "取决于参数类型，通常为浮点数或字符串",
+            "unit": "取决于参数类型",
+            "example": f"请描述{_extract_position(pname)}的边界条件类型和取值",
+        }
+    if "elevation" in path_lower or "elev" in path_lower or "top" in path_lower or "bottom" in path_lower or "rbot" in path_lower:
+        return {
+            "display_name_cn": pname,
+            "nature": "高程值，定义含水层或边界的几何位置",
+            "valid_range": "一般 -200 ~ 5000 m（海拔高程）",
+            "format": "浮点数，单位：米 (m)",
+            "unit": "米 (m)",
+            "example": f"请输入{_extract_position(pname)}的高程，例如 175.0",
+        }
+    if "initial" in path_lower or "starting" in path_lower:
+        return {
+            "display_name_cn": pname,
+            "nature": "模型的初始条件参数，用于设置模拟开始时的状态",
+            "valid_range": "取决于参数类型（水头/浓度），水头一般 0~5000 m",
+            "format": "取决于参数类型，通常为浮点数",
+            "unit": "取决于参数类型（水头: m, 浓度: mg/L）",
+            "example": f"请输入{_extract_position(pname)}的初始值，例如 230.0",
+        }
+    if "recharge" in path_lower or "rch" in path_lower:
+        return {
+            "display_name_cn": pname,
+            "nature": "面状补给速率，表示降雨入渗等补给强度",
+            "valid_range": "一般 0.0001 ~ 0.1 m/d（0.04~36.5 m/yr）",
+            "format": "浮点数或二维数组，单位：m/d",
+            "unit": "m/d",
+            "example": "请输入补给速率，例如 0.001",
+        }
+
+    # 通用回退：根据路径结构提供基本线索
+    parts = pname.split(".")
+    last_part = parts[-1] if parts else pname
+    return {
         "display_name_cn": pname,
-        "nature": "—",
-        "valid_range": "—",
-        "format": "—",
+        "nature": f"「{last_part}」参数 — 该参数尚未在系统参数库中注册，建议以标准 JSON IR 路径提供（如 aquifer.parameters.hk、grid.nrow 等）",
+        "valid_range": f"请根据专业经验判断「{last_part}」的合理取值范围",
+        "format": f"取决于「{last_part}」的参数类型，通常为浮点数、整数或字符串",
         "unit": "",
-        "example": "—",
-    })
+        "example": f"请输入「{last_part}」的取值",
+    }
+
+
+def _extract_position(pname: str) -> str:
+    """从参数路径中提取位置/方向信息"""
+    pos_hints = {
+        "west": "西侧", "east": "东侧", "north": "北侧", "south": "南侧",
+        "left": "左侧", "right": "右侧", "top": "顶部", "bottom": "底部",
+    }
+    for key, cn in pos_hints.items():
+        if key in pname.lower():
+            return cn + "边界"
+    return "该边界"
 
 
 def _render_markdown(p1: list, p2: list, p3: list) -> str:

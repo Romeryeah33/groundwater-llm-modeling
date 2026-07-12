@@ -479,12 +479,7 @@ class ParameterRangeConstraint:
                 results.append(self.check_param(pname, v, aqua_type))
 
         # 检查求解器参数
-        raw_solver = json_ir.get("solver", {})
-        if not isinstance(raw_solver, dict):
-            raw_solver = {}
-        solver = raw_solver.get("parameters", {})
-        if not isinstance(solver, dict):
-            solver = {}
+        solver = json_ir.get("solver", {}).get("parameters", {})
         for pname in ("hclose", "max_iter"):
             v = _unwrap(solver.get(pname))
             if v is not None:

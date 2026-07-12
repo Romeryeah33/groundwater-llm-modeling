@@ -269,7 +269,6 @@ class SolverMonitor:
     def _reduce_time_step(self, json_ir: dict, factor: float = 0.5):
         """减小时间步长"""
         stress = json_ir.get("stress_periods", {})
-        if not isinstance(stress, dict): stress = {}
         period_data = stress.get("period_data", [])
         for pd in period_data:
             pd["nstp"] = max(1, int(pd.get("nstp", 1) / factor))

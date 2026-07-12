@@ -334,14 +334,9 @@ class AutoModelBuilder:
         会因过于宽松而提前退出，导致非线性外迭代无法收敛。
         MODFLOW 6 官方建议 inner = outer / 10 ~ outer / 100。
         """
-        # 防御性解包（LLM 可能输出 {"value": X} 包装值）
-        def _sv(key, default):
-            v = solver_params.get(key, default)
-            if isinstance(v, dict): return v.get("value", default)
-            return v
-        outer_dvclose = _sv("hclose", 1e-5)
+        outer_dvclose = solver_params.get("hclose", 1e-5)
         # 如果用户未指定 rclose，默认设为 outer 的 1/10
-        rclose = _sv("rclose", None)
+        rclose = solver_params.get("rclose")
         if rclose is None:
             inner_dvclose = outer_dvclose * 0.1
         else:

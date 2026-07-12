@@ -121,7 +121,7 @@ class FloPyModelMapper:
             "aquifer_type": aqua.get("type", "confined"),
         }
 
-        # NPF 包参数（使用 _unwrap_value 兼容 dict 包装和裸值）
+        # NPF 包参数（使用 _unwrap_value 兼容 bare value 和 dict 包装两种格式）
         hk_v = self._unwrap_value(params.get("hk"))
         if hk_v is not None:
             result["hk"] = hk_v
@@ -133,6 +133,7 @@ class FloPyModelMapper:
         # 各向异性: hani = Kh/Kv, 因此 Kv = Kh / hani
         hani_v = self._unwrap_value(params.get("hani"))
         if hani_v is not None and vka_v is not None:
+            # 如果已独立指定 vka 则优先使用 vka
             pass
         elif hani_v is not None and hk_v is not None:
             result["vka"] = hk_v / hani_v
@@ -170,9 +171,6 @@ class FloPyModelMapper:
         name_lower = (bc_name or "").lower()
         nrow = grid.get("nrow", 50)
         ncol = grid.get("ncol", 50)
-        # 防御性解包：LLM 可能返回 {"value": 40} 而非裸 int
-        if isinstance(nrow, dict): nrow = nrow.get("value", 50)
-        if isinstance(ncol, dict): ncol = ncol.get("value", 50)
 
         # 注意：只使用有区分力的关键词，不含单字母匹配
         # 使用单词边界匹配避免 "northeast" 匹配到 "east" 等问题
@@ -227,9 +225,13 @@ class FloPyModelMapper:
         """
         bcs = json_ir.get("boundary_conditions", [])
         stress_periods = json_ir.get("stress_periods", {})
-        if not isinstance(stress_periods, dict):
+        # 防御：stress_periods 可能是字符串（LLM 未正确生成 dict）
+        if isinstance(stress_periods, str):
             stress_periods = {}
-        nper = stress_periods.get("nper", 1)
+        if isinstance(stress_periods, list):
+            # 列表格式：[{"nper": 1, "steady": true}, ...]
+            stress_periods = stress_periods[0] if stress_periods else {}
+        nper = stress_periods.get("nper", 1) if isinstance(stress_periods, dict) else 1
         grid = json_ir.get("grid", {})
 
         packages = {}
@@ -262,7 +264,7 @@ class FloPyModelMapper:
                 # head 可以是 float 或 {"value": float}
                 raw_head = params.get("head", 0.0)
                 if isinstance(raw_head, dict):
-                    head = self._unwrap_value(raw_head, 0.0)
+                    head = raw_head.get("value", 0.0)
                 else:
                     head = float(raw_head)
                 if indices:
@@ -295,16 +297,18 @@ class FloPyModelMapper:
                         ])
                 else:
                     # 井没有位置信息 → 放在模型中心
-                    center_row = int(self._unwrap_value(grid.get("nrow"), 50)) // 2
-                    center_col = int(self._unwrap_value(grid.get("ncol"), 50)) // 2
+                    center_row = grid.get("nrow", 50) // 2
+                    center_col = grid.get("ncol", 50) // 2
                     logger.info(f"井 '{bc.get('name')}' 默认放在中心 ({center_row}, {center_col})")
                     packages[package_name][0] = [
                         [(0, center_row, center_col), rate]
                     ]
 
             elif bc_type == "ghb":
-                raw_h = params.get("head", 0.0); head = raw_h.get("value", 0.0) if isinstance(raw_h, dict) else float(raw_h)
-                raw_c = params.get("conductance", 100.0); cond = raw_c.get("value", 100.0) if isinstance(raw_c, dict) else float(raw_c)
+                # GHB 水头可能叫 head 或 stage，兼容两种命名
+                raw_h = params.get("head") or params.get("stage", 0.0)
+                head = raw_h.get("value", raw_h) if isinstance(raw_h, dict) else float(raw_h)
+                raw_c = params.get("conductance", 100.0); cond = raw_c.get("value", raw_c) if isinstance(raw_c, dict) else float(raw_c)
                 if indices:
                     for idx in indices:
                         per = idx.get("period", 0)
@@ -354,23 +358,23 @@ class FloPyModelMapper:
             "species": transport.get("species", ["contaminant"]),
         }
 
-        al = disp_unwrap_value(disp.get("al"))
+        al = disp.get("al", {}).get("value")
         if al is not None:
             result["al"] = al
 
-        trpt = disp_unwrap_value(disp.get("trpt"))
+        trpt = disp.get("trpt", {}).get("value")
         if trpt is not None:
             result["trpt"] = trpt
         else:
             result["trpt"] = 0.1  # 默认 αTH/αL = 0.1
 
-        trpv = disp_unwrap_value(disp.get("trpv"))
+        trpv = disp.get("trpv", {}).get("value")
         if trpv is not None:
             result["trpv"] = trpv
         else:
             result["trpv"] = 0.01  # 默认 αTV/αL = 0.01
 
-        diffc = disp_unwrap_value(disp.get("diffc"))
+        diffc = disp.get("diffc", {}).get("value")
         if diffc is not None:
             result["diffc"] = diffc
         else:
@@ -380,14 +384,14 @@ class FloPyModelMapper:
         reaction = transport.get("reaction", {})
         if reaction.get("sorption", "none") != "none":
             result["sorption"] = reaction["sorption"]
-            kd = _unwrap_value(reaction.get("kd"))
+            kd = reaction.get("kd", {}).get("value")
             if kd is not None:
                 result["kd"] = kd
 
         decay = reaction.get("decay", {})
         if decay.get("type", "none") != "none":
             result["decay_type"] = decay["type"]
-            rate = _unwrap_value(decay.get("first_order_rate"))
+            rate = decay.get("first_order_rate", {}).get("value")
             if rate is not None:
                 result["decay_rate"] = rate
 
@@ -406,18 +410,26 @@ class FloPyModelMapper:
         solver = json_ir.get("solver", {})
         params = solver.get("parameters", {})
 
-        raw_name = solver.get("name", "pcg").lower()
+        # 兼容 solver.name 和 solver.type 两种写法
+        raw_name = solver.get("name") or solver.get("type", "pcg")
+        raw_name = str(raw_name).lower()
+        # 如果 solver 里没有 name/type，从参数里找 solver_type
+        if raw_name == "pcg" and isinstance(params, dict):
+            st = self._unwrap_value(params.get("solver_type"))
+            if st is not None:
+                raw_name = str(st).lower()
         mapped_name = self.SOLVER_MAP.get(raw_name, "CG")
 
+        # ── 关键修复：使用 _unwrap_value 安全解包 dict-wrapped 值 ──
         result = {
             "name": mapped_name,
-            "hclose": params.get("hclose", 1e-4),
-            "max_iter": int(params.get("max_iter", 100)),
-            "relax": params.get("relax", 1.0),
+            "hclose": self._unwrap_value(params.get("hclose"), 1e-4),
+            "max_iter": int(self._unwrap_value(params.get("max_iter"), 100)),
+            "relax": self._unwrap_value(params.get("relax"), 1.0),
         }
         # rclose 只在用户显式指定时才传递，让 _build_solver 根据 hclose 自动推算
         if "rclose" in params:
-            result["rclose"] = params["rclose"]
+            result["rclose"] = self._unwrap_value(params.get("rclose"))
         return result
 
     # ================================================================
@@ -443,6 +455,11 @@ class FloPyModelMapper:
     def _map_time_params(self, json_ir: dict) -> dict:
         """提取时间离散参数"""
         stress = json_ir.get("stress_periods", {})
+        # 防御：stress_periods 可能是字符串或列表
+        if isinstance(stress, str):
+            stress = {}
+        if isinstance(stress, list):
+            stress = stress[0] if stress else {}
         if not isinstance(stress, dict):
             stress = {}
         return {

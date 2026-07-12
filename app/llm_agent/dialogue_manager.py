@@ -2,11 +2,13 @@
 多轮对话管理器
 
 管理用户-系统之间的多轮对话，追踪建模上下文状态。
-负责：对话状态管理、引导性问题生成、建议值生成。
+负责：对话状态管理、引导性问题生成、建议值生成、会话持久化。
 """
 
 import json
 import logging
+import os
+from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
 from app.llm_agent.llm_client import LLMClient, llm_client
@@ -40,8 +42,8 @@ class DialogueManager:
         # 对话状态
         self.reset()
 
-    def reset(self):
-        """重置对话状态"""
+    def reset(self, sid: str = "default", delete_file: bool = False):
+        """重置对话状态。delete_file=True 时才删除持久化文件（仅用户主动清空时）"""
         self.state = {
             "phase": "intake",               # intake | clarification | confirmation | execution | review
             "json_ir": {"ir_version": "1.0"},  # 当前累积的 JSON IR
@@ -54,12 +56,74 @@ class DialogueManager:
             "model_built": False,             # 是否已构建模型
             "model_results": None,            # 模拟结果
         }
+        if delete_file:
+            self.delete_session(sid)
+
+    # ================================================================
+    # 会话持久化：重启后自动恢复，无需重新输入
+    # ================================================================
+
+    @staticmethod
+    def _session_dir() -> Path:
+        """获取会话存储目录"""
+        from app.config import settings
+        d = settings.data_dir / "sessions"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def save_session(self, sid: str = "default"):
+        """将会话状态持久化到磁盘"""
+        try:
+            state_copy = dict(self.state)
+            # set → list（JSON 不可序列化 set）
+            if isinstance(state_copy.get("answered_params"), set):
+                state_copy["answered_params"] = list(state_copy["answered_params"])
+            # 清理不可序列化的对象
+            state_copy["model_results"] = None  # 模拟结果不持久化
+            path = self._session_dir() / f"{sid}.json"
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(state_copy, f, ensure_ascii=False, indent=2, default=str)
+            logger.debug(f"会话已保存: {path} (IR 字段数: {len(state_copy['json_ir'])})")
+        except Exception as e:
+            logger.warning(f"会话保存失败: {e}")
+
+    def load_session(self, sid: str = "default") -> bool:
+        """从磁盘恢复会话状态。成功返回 True，无保存文件返回 False"""
+        path = self._session_dir() / f"{sid}.json"
+        if not path.exists():
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            # list → set（恢复 answered_params）
+            if isinstance(loaded.get("answered_params"), list):
+                loaded["answered_params"] = set(loaded["answered_params"])
+            if "model_results" not in loaded:
+                loaded["model_results"] = None
+            if "history" not in loaded:
+                loaded["history"] = []
+            self.state = loaded
+            logger.info(f"会话已恢复: {path} (历史 {len(loaded.get('history', []))} 轮, IR 字段数: {len(loaded.get('json_ir', {}))})")
+            return True
+        except Exception as e:
+            logger.warning(f"会话加载失败: {e}, 将使用空白状态")
+            return False
+
+    def delete_session(self, sid: str = "default"):
+        """删除持久化的会话文件（清空时调用）"""
+        path = self._session_dir() / f"{sid}.json"
+        try:
+            if path.exists():
+                os.remove(path)
+                logger.debug(f"会话文件已删除: {path}")
+        except Exception as e:
+            logger.warning(f"会话文件删除失败: {e}")
 
     # ================================================================
     # 主入口：处理用户输入
     # ================================================================
 
-    def process(self, user_message: str) -> dict:
+    def process(self, user_message: str, sid: str = "default") -> dict:
         """
         处理用户输入，返回系统响应
 
@@ -75,6 +139,9 @@ class DialogueManager:
         """
         # 记录用户消息
         self.state["history"].append({"role": "user", "content": user_message})
+
+        # Step 0: 正则提取显式路径赋值（如 "boundary_conditions[0].parameters.stage 设置为 212m"）
+        self._extract_explicit_assignments(user_message)
 
         # Step 1: 意图解析（携带对话历史，让 LLM 理解上下文）
         conversation_history = self._format_history_for_llm()
@@ -110,6 +177,9 @@ class DialogueManager:
 
         # 记录助手消息
         self.state["history"].append({"role": "assistant", "content": reply})
+
+        # ── 自动保存会话（重启后恢复，无需重新输入）──
+        self.save_session(sid)
 
         return {
             "reply": reply,
@@ -274,16 +344,9 @@ class DialogueManager:
 
         params = aqua.get("parameters", {})
         if isinstance(params, dict):
-            hk_raw = params.get("hk")
-            # 兼容 dict 包装 {"value": 15, ...} 和裸值 15（_normalize_ir 后）
-            if isinstance(hk_raw, dict):
-                hk_val = hk_raw.get("value")
-                hk_unit = hk_raw.get("unit", "m/d")
-            else:
-                hk_val = hk_raw
-                hk_unit = "m/d"
-            if hk_val is not None:
-                lines.append(f"  ✅ 渗透系数: {hk_val} {hk_unit}")
+            hk_val = params.get("hk", {}) if isinstance(params.get("hk"), dict) else {}
+            if hk_val.get("value") is not None:
+                lines.append(f"  ✅ 渗透系数: {hk_val['value']} {hk_val.get('unit', 'm/d')}")
             else:
                 lines.append(f"  ⚠️ 渗透系数: 未指定")
         else:
@@ -322,7 +385,7 @@ class DialogueManager:
         return "\n".join(lines)
 
     def _generate_questions(self, missing: dict) -> str:
-        """为缺失参数生成引导性问题（纯规则，快速且不耗 LLM）"""
+        """为缺失参数生成引导性问题"""
         p1 = missing.get("priority_1", [])
         p2 = missing.get("priority_2", [])
         p3 = missing.get("priority_3", [])
@@ -330,7 +393,19 @@ class DialogueManager:
         if not p1 and not p2 and not p3:
             return ""
 
-        return self._rule_based_questions(p1, p2, p3)
+        # 使用 LLM 生成自然问题
+        missing_summary = f"优先级1: {', '.join(p1) if p1 else '无'}\n优先级2: {', '.join(p2) if p2 else '无'}\n优先级3: {', '.join(p3) if p3 else '无'}"
+        context = self._build_context_str()
+
+        try:
+            prompt = QUESTION_GENERATION_PROMPT.format(
+                missing_params_summary=missing_summary,
+                conversation_context=context,
+            )
+            return self.llm.chat(prompt).strip()
+        except Exception as e:
+            logger.warning(f"LLM问题生成失败，使用规则生成: {e}")
+            return self._rule_based_questions(p1, p2, p3)
 
     def _rule_based_questions(self, p1: list, p2: list, p3: list) -> str:
         """基于规则生成问题（LLM不可用时的回退）"""
@@ -468,7 +543,7 @@ class DialogueManager:
         }
         return defaults.get(param_path)
 
-    def apply_all_suggestions(self) -> str:
+    def apply_all_suggestions(self, sid: str = "default") -> str:
         """一键应用所有建议值，更新 JSON IR，并告知无法自动补全的参数"""
         applied = []
         for pname, sinfo in self.state["suggested_values"].items():
@@ -516,8 +591,10 @@ class DialogueManager:
             )
 
         if not applied and not remaining_p1 and not remaining_p2:
+            self.save_session(sid)
             return "当前没有可用的建议值。"
 
+        self.save_session(sid)
         return "\n".join(reply_parts)
 
     def _generate_unfillable_params_guidance(
@@ -545,8 +622,26 @@ class DialogueManager:
         return ir
 
     def _set_ir_param(self, dot_path: str, value, unit: str = "", source: str = "user_input"):
-        """通过点路径设置 JSON IR 中的参数值（如 'aquifer.parameters.hk'）"""
+        """通过点路径设置 JSON IR 中的参数值（支持数组索引如 boundary_conditions[0].parameters.stage）"""
+        import re
         ir = self.state["json_ir"]
+
+        # ── 检测是否为数组索引路径 ──
+        if re.search(r'\[\d+\]', dot_path):
+            # 使用 IntentParser 的导航器处理
+            from app.llm_agent.intent_parser import IntentParser
+            if isinstance(value, (int, float, str, bool)):
+                write_value = {"value": value, "unit": unit, "source": source}
+            else:
+                write_value = value
+            container, key_or_idx = IntentParser._navigate_ir_path(
+                ir, dot_path, set_value=write_value
+            )
+            if container is None:
+                logger.warning(f"_set_ir_param 无法解析索引路径: {dot_path}")
+            return
+
+        # ── 常规路径处理（无数组索引）──
         parts = dot_path.split(".")
         for part in parts[:-1]:
             if part not in ir:
@@ -561,6 +656,78 @@ class DialogueManager:
                 ir[final_key] = value
             else:
                 ir[final_key] = {"value": value, "unit": unit, "source": source}
+
+    def _extract_explicit_assignments(self, user_message: str):
+        """
+        从用户消息中提取显式的路径赋值，直接写入 IR。
+
+        匹配模式：
+        - "boundary_conditions[0].parameters.stage 设置为 212m"
+        - "boundary_conditions[1].parameters.stage 设置为 208 m"
+        - "boundary_conditions[0].parameters.stage = 212"
+        - "P1 boundary_conditions[0].parameters.stage: 212"
+
+        支持带数组索引 [N] 的路径和可选的单位后缀。
+        """
+        import re
+
+        # 模式1: "PATH 设置为 VALUE [UNIT]" 或 "PATH 设置为 VALUE"
+        # PATH 支持点号分隔和数组索引，如 "boundary_conditions[0].parameters.stage"
+        path_pattern = r'([a-zA-Z_]\w*(?:\[\d+\])?(?:\.[a-zA-Z_]\w*(?:\[\d+\])?)*)'
+
+        patterns = [
+            # "PATH 设置为 VALUE UNIT" / "PATH设置为VALUEUNIT"
+            re.compile(
+                path_pattern + r'\s*设置\s*[为是]?\s*' +
+                r'([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*([a-zA-Z²³/·]*)'
+            ),
+            # "PATH 为 VALUE UNIT" / "PATH为VALUEUNIT" (无"设置"前缀)
+            re.compile(
+                path_pattern + r'\s*为\s*' +
+                r'([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*([a-zA-Z²³/·]*)'
+            ),
+            # "PATH = VALUE UNIT" / "PATH=VALUEUNIT"
+            re.compile(
+                path_pattern + r'\s*=\s*' +
+                r'([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*([a-zA-Z²³/·]*)'
+            ),
+            # "PATH: VALUE UNIT" / "PATH : VALUE"
+            re.compile(
+                path_pattern + r'\s*:\s*' +
+                r'([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*([a-zA-Z²³/·]*)'
+            ),
+        ]
+
+        for pattern in patterns:
+            for match in pattern.finditer(user_message):
+                path = match.group(1)
+                value_str = match.group(2)
+                unit = match.group(3).strip() if match.group(3) else ""
+
+                # 只处理包含数组索引或顶层键为 boundary_conditions 的路径
+                # 常规路径（如 aquifer.parameters.hk）由 LLM 管道处理
+                if not re.search(r'\[\d+\]', path):
+                    continue
+
+                # 验证路径的顶层键有效
+                top_key_base = re.sub(r'\[\d+\]', '', path.split('.')[0])
+                valid_keys = {"boundary_conditions", "source_sinks", "observation_points",
+                              "aquifer", "grid", "domain", "project", "transport",
+                              "solver", "stress_periods", "initial_conditions", "output"}
+                if top_key_base not in valid_keys:
+                    continue
+
+                try:
+                    val = float(value_str)
+                    # 尝试智能整数检测（无小数点 → int）
+                    if '.' not in value_str and 'e' not in value_str.lower():
+                        val = int(value_str)
+                except ValueError:
+                    continue
+
+                # 直接写入 IR
+                self._set_ir_param(path, val, unit, "user_input")
+                logger.info(f"显式赋值: {path} = {val} {unit}")
 
     def _param_display_name(self, param_path: str) -> str:
         """获取参数的中文显示名"""

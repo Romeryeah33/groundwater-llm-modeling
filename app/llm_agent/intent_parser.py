@@ -7,6 +7,7 @@
 
 import json
 import copy
+import re
 import logging
 from typing import Optional, Dict, List, Tuple
 
@@ -24,6 +25,33 @@ logger = logging.getLogger(__name__)
 
 class IntentParser:
     """意图解析引擎"""
+
+    # ── 标准 IR 顶层键白名单 ──
+    VALID_TOP_KEYS = {
+        "ir_version", "project", "domain", "grid", "aquifer",
+        "boundary_conditions", "stress_periods", "solver",
+        "transport", "output", "source_sinks", "initial_conditions",
+        "observation_points",
+    }
+
+    # ── 已知的标准参数路径（用于检测/指南匹配） ──
+    KNOWN_PARAM_PATHS = {
+        "project.name", "project.model_type",
+        "domain.x_range", "domain.y_range",
+        "grid.nrow", "grid.ncol", "grid.nlay", "grid.delr", "grid.delc",
+        "grid.top", "grid.bottom",
+        "aquifer.type", "aquifer.parameters.hk", "aquifer.parameters.vka",
+        "aquifer.parameters.hani", "aquifer.parameters.sy",
+        "aquifer.parameters.ss", "aquifer.parameters.porosity",
+        "stress_periods",
+        "solver.type", "solver.hclose", "solver.rclose",
+        "solver.mxiter", "solver.iter1",
+        "transport.enabled", "transport.dispersion.al",
+        "transport.dispersion.trpt", "transport.dispersion.trpv",
+        "transport.reaction.decay.first_order_rate",
+        "transport.reaction.sorption.kd",
+        "boundary_conditions",
+    }
 
     def __init__(
         self,
@@ -105,13 +133,12 @@ class IntentParser:
 
     def extract_entities(
         self, user_message: str, context_info: dict = None, conversation_history: str = ""
-    ) -> tuple:
+    ) -> List[dict]:
         """
-        提取建模相关的命名实体和参数值 + 意图分类（合并为一次 LLM 调用）
+        提取建模相关的命名实体和参数值
 
         Returns:
-            (intent: str, entities: list)
-            如 ("new_model", [{"entity_type": "parameter_name", ...}, ...])
+            [{"entity_type": "parameter_name", "value": 15.0, "unit": "m/d", "standard_name": "hk"}, ...]
         """
         context_str = ""
         if context_info:
@@ -123,34 +150,15 @@ class IntentParser:
             conversation_history=conversation_history or "（无历史，这是第一轮对话）",
         )
         try:
-            result = self.llm.chat_json(prompt)
-            intent = "unclear"
-            entities = []
-            if isinstance(result, dict):
-                intent = result.get("intent", "unclear")
-                entities = result.get("entities", [])
-            elif isinstance(result, list):
-                # 回退：如果 LLM 仍返回数组
-                entities = result
-            if not isinstance(entities, list):
-                entities = []
-            # 规范化 intent
-            valid_intents = [
-                "new_model", "modify_param", "query", "analyze",
-                "upload_file", "confirm", "reject", "unclear",
-            ]
-            intent_lower = str(intent).strip().lower()
-            if intent_lower in valid_intents:
-                return intent_lower, entities
-            # 模糊匹配
-            for vi in valid_intents:
-                if vi in intent_lower:
-                    return vi, entities
-            logger.warning(f"未知意图: {intent}, 回退为 unclear")
-            return "unclear", entities
+            result = self.llm.chat_json(prompt, expect_array=True)
+            if isinstance(result, list):
+                return result
+            elif isinstance(result, dict) and "entities" in result:
+                return result["entities"]
+            return []
         except Exception as e:
             logger.error(f"实体提取失败: {e}")
-            return "unclear", []
+            return []
 
     # ================================================================
     # Step 3: 语义库匹配与标准化
@@ -188,17 +196,26 @@ class IntentParser:
                 if not name:
                     continue
 
-                # 在语义库中搜索标准参数名
-                matches = self.sem_db.search_term(name)
-                if matches:
-                    matched_name = matches[0]["standard_name"]
+                # ── 检查标准名是否已经是带数组索引的完整路径 ──
+                # 如 "boundary_conditions[0].parameters.stage" → 直接使用
+                if re.search(r'\[\d+\]', name) and '.' in name:
+                    ir_path = name
+                    # 验证顶层键有效
+                    top_key_base = re.sub(r'\[\d+\]', '', ir_path.split('.')[0])
+                    if top_key_base not in self.VALID_TOP_KEYS:
+                        continue
                 else:
-                    matched_name = name
+                    # 在语义库中搜索标准参数名
+                    matches = self.sem_db.search_term(name)
+                    if matches:
+                        matched_name = matches[0]["standard_name"]
+                    else:
+                        matched_name = name
 
-                # 映射到 IR dot-path
-                ir_path = self._param_to_ir_path(matched_name)
-                if not ir_path:
-                    continue
+                    # 映射到 IR dot-path
+                    ir_path = self._param_to_ir_path(matched_name)
+                    if not ir_path:
+                        continue
 
                 value = entity.get("value")
                 # 跳过字符串类型的参数名（如标准名本身）
@@ -479,6 +496,10 @@ class IntentParser:
                 if isinstance(entry, dict):
                     boundary_entries.append(entry)
 
+        def _is_indexed_path(path: str) -> bool:
+            """检查路径是否包含数组索引"""
+            return bool(re.search(r'\[\d+\]', path))
+
         for ir_path, param_info in normalized.items():
             # 跳过特殊提示键（以 _ 开头）
             if ir_path.startswith("_"):
@@ -491,6 +512,21 @@ class IntentParser:
             if value is None:
                 continue
 
+            # ── 带数组索引的路径：使用导航器处理 ──
+            if _is_indexed_path(ir_path):
+                # 决定值的写入格式
+                if isinstance(value, (int, float, str, bool)):
+                    write_value = {
+                        "value": value, "unit": unit, "source": source,
+                    }
+                else:
+                    write_value = value
+                container, key_or_idx = self._navigate_ir_path(ir, ir_path, set_value=write_value)
+                if container is None:
+                    logger.warning(f"无法解析索引路径: {ir_path}")
+                continue
+
+            # ── 常规路径处理（无数组索引）──
             parts = ir_path.split(".")
             # 导航到目标位置，必要时创建中间节点
             current = ir
@@ -546,67 +582,6 @@ class IntentParser:
                     clean_bcs.append(entry)
             ir["boundary_conditions"] = clean_bcs
 
-        # 规范化：统一展开 dict 包装值，避免下游收到 {"value": X} 而非裸值
-        ir = IntentParser._normalize_ir(ir)
-
-        return ir
-
-    @staticmethod
-    def _normalize_ir(ir: dict) -> dict:
-        """统一展开 IR 中的 dict 包装值（{"value": X, "unit": ...} → X）
-
-        这是防御 LLM 输出格式不一致的关键步骤。
-        grid、solver、aquifer 参数中所有 dict 包装值都会被展开为裸值。
-        """
-        def _unwrap(v):
-            if isinstance(v, dict) and "value" in v:
-                return v.get("value")
-            return v
-
-        # 展开 grid 中所有数值字段
-        if "grid" in ir and isinstance(ir["grid"], dict):
-            g = ir["grid"]
-            for key in ("nrow", "ncol", "nlay", "delr", "delc", "top", "bottom"):
-                if key in g:
-                    g[key] = _unwrap(g[key])
-
-        # 展开 aquifer.parameters 中所有值
-        if "aquifer" in ir and isinstance(ir["aquifer"], dict):
-            params = ir["aquifer"].get("parameters", {})
-            if isinstance(params, dict):
-                for key, val in params.items():
-                    if isinstance(val, dict) and "value" in val:
-                        params[key] = val["value"]
-
-        # 展开 solver.parameters 中所有值
-        if "solver" in ir and isinstance(ir["solver"], dict):
-            sp = ir["solver"].get("parameters", {})
-            if isinstance(sp, dict):
-                for key, val in sp.items():
-                    if isinstance(val, dict) and "value" in val:
-                        sp[key] = val["value"]
-
-        # 展开 stress_periods（如果是 dict 且有嵌套包装）
-        if "stress_periods" in ir:
-            sp = ir["stress_periods"]
-            if isinstance(sp, dict):
-                for key in ("nper", "perlen", "steady_state"):
-                    if key in sp:
-                        sp[key] = _unwrap(sp[key])
-
-        # 展开 boundary_conditions 中各边界条件的 parameters
-        #   如 {"type":"chd", "parameters":{"head":{"value":100, "unit":"m"}}}
-        #   → {"type":"chd", "parameters":{"head":100}}
-        if "boundary_conditions" in ir:
-            bcs = ir["boundary_conditions"]
-            if isinstance(bcs, list):
-                for bc in bcs:
-                    if isinstance(bc, dict):
-                        bc_params = bc.get("parameters", {})
-                        if isinstance(bc_params, dict):
-                            for key, val in list(bc_params.items()):
-                                bc_params[key] = _unwrap(val)
-
         return ir
 
     @staticmethod
@@ -619,6 +594,188 @@ class IntentParser:
         if isinstance(val, (list, dict)) and len(val) == 0:
             return True
         return False
+
+    @staticmethod
+    def _has_value(v) -> bool:
+        """格式无关的值检查：支持裸值和 dict-wrapped {value, unit, source} 两种格式"""
+        if v is None:
+            return False
+        if isinstance(v, dict):
+            inner = v.get("value")
+            if inner is None:
+                return False
+            if isinstance(inner, str) and not inner.strip():
+                return False
+            if isinstance(inner, (list, dict)) and len(inner) == 0:
+                return False
+            return True
+        if isinstance(v, str) and not v.strip():
+            return False
+        if isinstance(v, (list, dict)) and len(v) == 0:
+            return False
+        return True
+
+    # ================================================================
+    # 数组索引路径解析器
+    # ================================================================
+
+    @staticmethod
+    def _parse_path_segment(segment: str) -> tuple:
+        """
+        解析路径段，分离键名和可选的数组索引。
+
+        Examples:
+            "boundary_conditions[0]" → ("boundary_conditions", 0)
+            "parameters" → ("parameters", None)
+            "hk" → ("hk", None)
+
+        Returns:
+            (key_name: str, index: int | None)
+        """
+        m = re.match(r'^(\w+)\[(\d+)\]$', segment)
+        if m:
+            return m.group(1), int(m.group(2))
+        return segment, None
+
+    @classmethod
+    def _navigate_ir_path(cls, ir: dict, dot_path: str, set_value=None):
+        """
+        在 IR dict 中按点路径导航，支持数组索引。
+
+        Args:
+            ir: 目标 IR dict
+            dot_path: 如 "boundary_conditions[0].parameters.stage"
+            set_value: 如果不为 None，则在路径终点写入该值
+
+        Returns:
+            (container, key_or_index) 或写入成功返回 (container, key_or_index)
+            如果路径不可达且 set_value 为 None，返回 (None, None)
+        """
+        segments = dot_path.split(".")
+        current = ir
+
+        for i, segment in enumerate(segments[:-1]):
+            key, idx = cls._parse_path_segment(segment)
+
+            if idx is not None:
+                # 数组访问：先拿到列表
+                if key not in current:
+                    if set_value is not None:
+                        current[key] = []
+                    else:
+                        return None, None
+                arr = current[key]
+                if not isinstance(arr, list):
+                    if set_value is not None:
+                        arr = []
+                        current[key] = arr
+                    else:
+                        return None, None
+                # 确保数组有足够长度
+                if idx >= len(arr):
+                    if set_value is not None:
+                        while len(arr) <= idx:
+                            arr.append({})
+                    else:
+                        return None, None
+                current = arr[idx]
+            else:
+                # 普通 dict 访问
+                if segment not in current:
+                    if set_value is not None:
+                        current[segment] = {}
+                    else:
+                        return None, None
+                if not isinstance(current[segment], dict):
+                    if set_value is not None:
+                        current[segment] = {}
+                    else:
+                        return None, None
+                current = current[segment]
+
+        # 处理最终段
+        final_seg = segments[-1]
+        final_key, final_idx = cls._parse_path_segment(final_seg)
+
+        if final_idx is not None:
+            if final_key not in current:
+                if set_value is not None:
+                    current[final_key] = []
+                else:
+                    return None, None
+            arr = current[final_key]
+            if not isinstance(arr, list):
+                if set_value is not None:
+                    arr = []
+                    current[final_key] = arr
+                else:
+                    return None, None
+            if final_idx >= len(arr):
+                if set_value is not None:
+                    while len(arr) <= final_idx:
+                        arr.append({})
+                else:
+                    return None, None
+            if set_value is not None:
+                arr[final_idx] = set_value
+            return current, final_key
+        else:
+            if set_value is not None:
+                current[final_key] = set_value
+            return current, final_key
+
+    # ================================================================
+    # 参数路径净化
+    # ================================================================
+
+    def _is_known_param_path(self, path: str) -> bool:
+        """检查参数路径是否为已知的标准路径"""
+        if path in self.KNOWN_PARAM_PATHS:
+            return True
+        # 提取顶层键（去除括号索引如 boundary_conditions[0] → boundary_conditions）
+        parts = path.split(".")
+        top_key = parts[0] if parts else ""
+        top_key_base = re.sub(r'\[\d+\]', '', top_key)  # 去掉数组索引
+        # 检查顶层键是否在白名单中
+        if top_key_base not in self.VALID_TOP_KEYS:
+            return False
+        # 检查前两段是否形成已知路径的前缀
+        for known in self.KNOWN_PARAM_PATHS:
+            if path == known or path.startswith(known + "."):
+                return True
+        # 对于 boundary_conditions 内部路径，允许子字段缺失检查
+        if top_key_base == "boundary_conditions":
+            return True
+        if top_key_base in ("aquifer", "grid", "domain", "project", "transport", "solver", "initial_conditions"):
+            return True
+        return False
+
+    def _sanitize_missing_paths(self, paths: list) -> list:
+        """过滤缺失参数列表，只保留已知标准路径"""
+        sanitized = []
+        for p in paths:
+            if self._is_known_param_path(p):
+                sanitized.append(p)
+            else:
+                logger.debug(f"过滤非标准缺失路径: {p}")
+        return sanitized
+
+    def _clean_ir_nonstandard_keys(self, ir: dict) -> dict:
+        """移除 LLM 在 IR 中引入的非标准顶层键"""
+        if not isinstance(ir, dict):
+            return ir
+        cleaned = {}
+        removed = []
+        for key, val in ir.items():
+            key_base = re.sub(r'\[\d+\]', '', key)
+            if key_base in self.VALID_TOP_KEYS or key.startswith("_"):
+                cleaned[key] = val
+            else:
+                removed.append(key)
+                logger.debug(f"移除 IR 中非标准顶层键: {key}")
+        if removed:
+            logger.info(f"已从 IR 中移除非标准顶层键: {removed}")
+        return cleaned
 
     def _merge_ir(self, base: dict, overlay: dict) -> dict:
         """
@@ -634,6 +791,11 @@ class IntentParser:
             return copy.deepcopy(base) if base else {}
         result = copy.deepcopy(base) if base else {}
         for key, val in overlay.items():
+            # 跳过 LLM 编造的非标准顶层键
+            key_base = re.sub(r'\[\d+\]', '', key)
+            if key_base not in self.VALID_TOP_KEYS and not key.startswith("_"):
+                logger.debug(f"_merge_ir 跳过非标准键: {key}")
+                continue
             if key not in result:
                 result[key] = copy.deepcopy(val) if isinstance(val, (dict, list)) else val
             elif isinstance(result[key], dict) and isinstance(val, dict):
@@ -685,6 +847,8 @@ class IntentParser:
             if not isinstance(result, dict):
                 logger.warning(f"chat_json 返回了 {type(result).__name__} 而非 dict，回退到 current_ir")
                 return current_ir
+            # 清理 LLM 生成的 IR 中的非标准键
+            result = self._clean_ir_nonstandard_keys(result)
             return result
         except Exception as e:
             logger.error(f"JSON IR生成失败: {e}")
@@ -701,6 +865,9 @@ class IntentParser:
         Returns:
             {"priority_1": [...], "priority_2": [...], "priority_3": [...]}
         """
+        # 先清理 IR 中的非标准键，避免 LLM 编造路径
+        json_ir = self._clean_ir_nonstandard_keys(json_ir)
+
         # 规则检测（快速，不耗LLM）
         rule_based = self._rule_based_missing_check(json_ir)
 
@@ -714,45 +881,19 @@ class IntentParser:
                 json_ir=json.dumps(json_ir, ensure_ascii=False, indent=2)
             )
             llm_result = self.llm.chat_json(prompt)
+            p1 = self._sanitize_missing_paths(llm_result.get("priority_1_missing", []))
+            p2 = self._sanitize_missing_paths(llm_result.get("priority_2_missing", []))
+            p3 = self._sanitize_missing_paths(llm_result.get("priority_3_missing", []))
             return {
-                "priority_1": llm_result.get("priority_1_missing", []),
-                "priority_2": llm_result.get("priority_2_missing", []),
-                "priority_3": llm_result.get("priority_3_missing", []),
+                "priority_1": p1,
+                "priority_2": p2,
+                "priority_3": p3,
             }
         except Exception:
             return rule_based
 
-    @staticmethod
-    def _has_value(v) -> bool:
-        """判断参数是否有非空值（兼容 dict 包装格式和裸值格式）
-
-        关键：_normalize_ir() 会将 {"value": X, "unit": ...} 展开为裸值 X，
-        此方法同时兼容两种格式，避免归一化后参数被误判为缺失。
-        """
-        if v is None:
-            return False
-        # dict 包装格式：{"value": X, "unit": "...", ...}
-        if isinstance(v, dict):
-            inner = v.get("value")
-            if inner is None:
-                return False
-            if isinstance(inner, str) and not inner.strip():
-                return False
-            return True
-        # 裸值格式：float / int / str / list / dict
-        if isinstance(v, str) and not v.strip():
-            return False
-        if isinstance(v, (list, dict)) and len(v) == 0:
-            return False
-        return True
-
     def _rule_based_missing_check(self, json_ir: dict) -> Dict[str, List[str]]:
-        """基于规则的缺失参数检测（快速路径）
-
-        兼容两种参数格式：
-        - dict 包装：{"value": 15.0, "unit": "m/d", "source": "user_input"}
-        - 裸值（_normalize_ir 后）：15.0
-        """
+        """基于规则的缺失参数检测（快速路径）"""
         missing_p1 = []
         missing_p2 = []
         missing_p3 = []
@@ -766,38 +907,72 @@ class IntentParser:
         aqua_type = aquifer.get("type", "")
 
         # 检查阻断性参数 (P1)
-        if not project.get("name"):
+        if not self._has_value(project.get("name")):
             missing_p1.append("project.name")
-        if not project.get("model_type"):
+        if not self._has_value(project.get("model_type")):
             missing_p1.append("project.model_type")
-        if not domain.get("x_range"):
+        if not self._has_value(domain.get("x_range")):
             missing_p1.append("domain.x_range")
-        if not domain.get("y_range"):
+        if not self._has_value(domain.get("y_range")):
             missing_p1.append("domain.y_range")
         if not self._has_value(grid.get("nrow")):
             missing_p1.append("grid.nrow")
         if not self._has_value(grid.get("ncol")):
             missing_p1.append("grid.ncol")
-        if not aqua_type:
+        if not self._has_value(aqua_type):
             missing_p1.append("aquifer.type")
 
-        if not isinstance(aqua_params, dict):
+        if not isinstance(aqua_params, dict) or not self._has_value(aqua_params.get("hk")):
             missing_p1.append("aquifer.parameters.hk")
-        else:
-            if not self._has_value(aqua_params.get("hk")):
-                missing_p1.append("aquifer.parameters.hk")
-
         bcs = json_ir.get("boundary_conditions")
         if not bcs or not isinstance(bcs, list) or len(bcs) == 0:
             missing_p1.append("boundary_conditions")
+        else:
+            # 检查每个边界条件是否有必需的参数
+            for i, bc in enumerate(bcs):
+                if not isinstance(bc, dict):
+                    continue
+                bc_type = bc.get("type", "")
+                bc_params = bc.get("parameters", {})
+                if not isinstance(bc_params, dict):
+                    bc_params = {}
+
+                if bc_type == "ghb":
+                    # GHB 必须指定水头（stage 或 head）
+                    if not self._has_value(bc_params.get("stage")) and not self._has_value(bc_params.get("head")):
+                        missing_p1.append(f"boundary_conditions[{i}].parameters.stage")
+                    if not self._has_value(bc_params.get("conductance")):
+                        missing_p2.append(f"boundary_conditions[{i}].parameters.conductance")
+
+                elif bc_type == "chd":
+                    if not self._has_value(bc_params.get("head")):
+                        missing_p1.append(f"boundary_conditions[{i}].parameters.head")
+
+                elif bc_type == "wel":
+                    if not self._has_value(bc_params.get("rate")):
+                        missing_p1.append(f"boundary_conditions[{i}].parameters.rate")
+
+                elif bc_type == "riv":
+                    if not self._has_value(bc_params.get("stage")):
+                        missing_p1.append(f"boundary_conditions[{i}].parameters.stage")
+                    if not self._has_value(bc_params.get("conductance")):
+                        missing_p2.append(f"boundary_conditions[{i}].parameters.conductance")
+
+                elif bc_type == "drn":
+                    if not self._has_value(bc_params.get("elevation")):
+                        missing_p1.append(f"boundary_conditions[{i}].parameters.elevation")
 
         # 检查影响性参数 (P2)
         if not self._has_value(grid.get("top")):
             missing_p2.append("grid.top")
         if not self._has_value(grid.get("bottom")):
             missing_p2.append("grid.bottom")
-        if not json_ir.get("stress_periods"):
+        if not self._has_value(json_ir.get("stress_periods")):
             missing_p2.append("stress_periods")
+        # 初始条件：稳态模拟可选（用水力默认值），瞬态必须
+        init = json_ir.get("initial_conditions", {})
+        if not isinstance(init, dict) or len(init) == 0:
+            missing_p2.append("initial_conditions")
 
         if isinstance(aqua_params, dict):
             if aqua_type in ("unconfined", "convertible"):
@@ -808,6 +983,8 @@ class IntentParser:
                     missing_p2.append("aquifer.parameters.ss")
 
         # 检查优化性参数 (P3)
+        if not self._has_value(grid.get("nlay")):
+            missing_p3.append("grid.nlay")
         if isinstance(aqua_params, dict):
             if not self._has_value(aqua_params.get("porosity")):
                 missing_p3.append("aquifer.parameters.porosity")
@@ -815,7 +992,7 @@ class IntentParser:
                 missing_p3.append("aquifer.parameters.vka")
 
         transport = json_ir.get("transport", {})
-        if transport.get("enabled"):
+        if self._has_value(transport.get("enabled")):
             disp = transport.get("dispersion", {})
             if isinstance(disp, dict):
                 if not self._has_value(disp.get("al")):
@@ -858,9 +1035,12 @@ class IntentParser:
         current_ir = current_ir or {}
         session_context = session_context or {}
 
-        # Step 1+2 合并: 意图分类 + 实体提取（一次 LLM 调用，节省 ~10s）
-        intent, entities = self.extract_entities(user_message, current_ir, conversation_history)
-        logger.info(f"意图分类: {intent}, 提取实体数: {len(entities)}")
+        # Step 1: 意图分类（带上下文）
+        intent = self.classify_intent(user_message, conversation_history, current_ir)
+        logger.info(f"意图分类: {intent}")
+
+        # Step 2: 实体提取（带对话历史）
+        entities = self.extract_entities(user_message, current_ir, conversation_history)
 
         # Step 3: 标准化 + 直接写入 IR（绕过 LLM，确保参数不丢失）
         normalized = self.normalize_entities(entities)
@@ -887,24 +1067,11 @@ class IntentParser:
         #   将 patched_ir（累积所有历史参数）作为底版，LLM 输出仅用于新增字段。
         json_ir = self._merge_ir(patched_ir, json_ir)
 
-        # 最终规范化：确保全部 dict 包装值已展开为裸值
-        json_ir = self._normalize_ir(json_ir)
+        # ── 防御 4: 清理 LLM 引入的非标准顶层键 ──
+        json_ir = self._clean_ir_nonstandard_keys(json_ir)
 
-        # 调试：记录本轮 IR 的关键参数（帮助排查参数保持问题）
-        logger.info(
-            "IR 合并完成: project=%s, model_type=%s, hk=%s, bcs=%d, grid=%s×%s",
-            json_ir.get("project", {}).get("name", "?"),
-            json_ir.get("project", {}).get("model_type", "?"),
-            json_ir.get("aquifer", {}).get("parameters", {}).get("hk", "?"),
-            len(json_ir.get("boundary_conditions", []) or []),
-            json_ir.get("grid", {}).get("nrow", "?"),
-            json_ir.get("grid", {}).get("ncol", "?"),
-        )
-
-        # Step 5: 缺失参数检测（仅使用规则检测，跳过 LLM 检测节省 5-10s）
-        #   注意：LLM 的 detect_missing_params 会将 initial_conditions 误报为缺失，
-        #   规则检测更准确且更快
-        missing = self._rule_based_missing_check(json_ir)
+        # Step 5: 缺失参数检测
+        missing = self.detect_missing_params(json_ir)
 
         # 判断是否需要澄清
         needs_clarification = (

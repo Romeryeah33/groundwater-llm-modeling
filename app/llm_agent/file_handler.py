@@ -2,6 +2,7 @@
 文件上传解析模块
 
 支持解析：
+- ZIP 压缩包 — 自动解压并识别内部所有支持的文件格式
 - SHP (Shapefile) — 边界、河流、点位
 - GeoJSON / KML — 空间矢量
 - Excel (.xlsx/.xls) — 调查点位、井信息、地层数据
@@ -12,6 +13,8 @@
 import json
 import logging
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional, List, Dict
 from zipfile import ZipFile
@@ -27,6 +30,7 @@ class FileUploadHandler:
 
     # 支持的文件类型
     SUPPORTED_EXTENSIONS = {
+        ".zip": "zip_archive",
         ".shp": "shapefile_polygon",
         ".geojson": "geojson",
         ".kml": "kml",
@@ -60,9 +64,10 @@ class FileUploadHandler:
 
         Returns:
             {
-                "shapefiles": {"boundary": {...}, "lines": [...], "points": [...]},
+                "shapefiles": {...},
                 "excel_data": {...},
                 "raster_data": {...},
+                "csv_data": {...},
                 "summary": "文件解析摘要文本"
             }
         """
@@ -71,12 +76,45 @@ class FileUploadHandler:
             "excel_data": {},
             "raster_data": {},
             "csv_data": {},
+            "extracted_file_paths": [],  # ZIP 解压出的所有文件路径
             "errors": [],
             "summary": "",
         }
 
-        # 分组：将SHP相关文件(.shp/.shx/.dbf/.prj)组合在一起
-        file_groups = self._group_shapefiles(files)
+        # 分离 ZIP 文件和非 ZIP 文件
+        zip_files = []
+        non_zip_files = []
+        for f in files:
+            if not hasattr(f, 'name'):
+                continue
+            ext = Path(f.name).suffix.lower()
+            if ext == '.zip':
+                zip_files.append(f)
+            else:
+                non_zip_files.append(f)
+
+        # 先处理 ZIP 文件：解压后提取所有可识别文件
+        all_extracted_files = []
+        for zf in zip_files:
+            extracted = self._parse_zip(zf)
+            if extracted.get("errors"):
+                result["errors"].extend(extracted["errors"])
+            # 将解压出的文件路径收集起来，统一解析
+            for file_path in extracted.get("extracted_files", []):
+                all_extracted_files.append(file_path)
+            if extracted.get("extracted_files"):
+                logger.info(f"从 {zf.name} 解压了 {len(extracted['extracted_files'])} 个文件")
+
+        # 持久化解压文件路径
+        result["extracted_file_paths"] = all_extracted_files
+
+        # 解析解压出的文件
+        if all_extracted_files:
+            zip_result = self._parse_extracted_files(all_extracted_files)
+            self._merge_results(result, zip_result)
+
+        # 处理非 ZIP 文件（原有逻辑）
+        file_groups = self._group_shapefiles(non_zip_files)
 
         for group_name, group_files in file_groups.items():
             if group_name.startswith("shapefile_"):
@@ -106,6 +144,15 @@ class FileUploadHandler:
 
         result["summary"] = self._generate_summary(result)
         return result
+
+    @staticmethod
+    def _merge_results(target: dict, source: dict):
+        """将 source 结果合并到 target 中"""
+        for key in ("shapefiles", "excel_data", "raster_data", "csv_data"):
+            if key in source:
+                target[key].update(source[key])
+        if "errors" in source:
+            target["errors"].extend(source["errors"])
 
     def _group_shapefiles(self, files: List) -> Dict[str, List]:
         """将SHP相关文件分组"""
@@ -152,6 +199,125 @@ class FileUploadHandler:
                     groups[category].append(f)
 
         return groups
+
+    # ================================================================
+    # ZIP 压缩包解析
+    # ================================================================
+
+    # 压缩包内可识别的文件扩展名（不含 .zip 本身）
+    _RECOGNIZED_EXTS = {".shp", ".shx", ".dbf", ".prj", ".geojson",
+                        ".kml", ".xlsx", ".xls", ".csv", ".tif", ".tiff",
+                        ".asc", ".txt", ".png", ".jpg", ".jpeg", ".bmp"}
+
+    def _parse_zip(self, zip_file) -> dict:
+        """
+        解析 ZIP 压缩包：解压到临时目录，扫描可识别的文件
+
+        Returns:
+            {"extracted_files": [path, ...], "errors": [...]}
+        """
+        result = {"extracted_files": [], "errors": []}
+        try:
+            temp_dir = tempfile.mkdtemp(prefix="gm_zip_")
+            zip_path = self._get_temp_path(zip_file)
+
+            with ZipFile(zip_path, 'r') as zf:
+                # 安全检查：防止 zip slip 攻击
+                for member in zf.namelist():
+                    # 跳过目录和隐藏文件
+                    if member.endswith('/') or member.startswith('__MACOSX') or member.startswith('.'):
+                        continue
+                    basename = os.path.basename(member)
+                    if basename.startswith('.') or basename.startswith('~'):
+                        continue
+
+                    ext = Path(member).suffix.lower()
+                    if ext not in self._RECOGNIZED_EXTS:
+                        continue
+
+                    try:
+                        # 安全提取：只取文件名，丢弃路径前缀
+                        dest_path = os.path.join(temp_dir, basename)
+                        # 避免同名文件覆盖
+                        if os.path.exists(dest_path):
+                            stem = Path(basename).stem
+                            dest_path = os.path.join(temp_dir, f"{stem}_{hash(member) & 0xFFFF:04x}{ext}")
+
+                        source = zf.open(member)
+                        with open(dest_path, 'wb') as target:
+                            shutil.copyfileobj(source, target)
+                        result["extracted_files"].append(dest_path)
+                        logger.debug(f"ZIP提取: {member} → {basename}")
+                    except Exception as e:
+                        logger.warning(f"ZIP提取失败: {member}: {e}")
+
+            if not result["extracted_files"]:
+                result["errors"].append(f"压缩包 {getattr(zip_file, 'name', '?')} 中未找到可识别的建模数据文件。支持: {', '.join(sorted(self._RECOGNIZED_EXTS))}")
+
+        except Exception as e:
+            logger.error(f"ZIP解析失败: {e}")
+            result["errors"].append(f"压缩包解析失败: {e}")
+
+        return result
+
+    def _parse_extracted_files(self, file_paths: List[str]) -> dict:
+        """
+        解析从压缩包中提取的文件列表，按类型分组后调用对应解析器
+
+        将文件路径封装为简单的 FileInfo 对象，复用现有的分组与解析逻辑
+        """
+        result = {
+            "shapefiles": {},
+            "excel_data": {},
+            "raster_data": {},
+            "csv_data": {},
+            "errors": [],
+        }
+
+        # 封装为简单的类文件对象（兼容现有 _group_shapefiles）
+        class _FileInfo:
+            def __init__(self, path):
+                self.name = path
+                self._path = path
+
+        file_objs = [_FileInfo(p) for p in file_paths]
+
+        # 分组解析
+        file_groups = self._group_shapefiles(file_objs)
+
+        for group_name, group_files in file_groups.items():
+            if group_name.startswith("shapefile_"):
+                parsed = self._parse_shapefile_group(group_files[0])
+                if parsed:
+                    # 用原始文件名作为 key
+                    display_name = Path(group_files[0].name).stem
+                    result["shapefiles"][display_name] = parsed
+            elif group_name == "excel":
+                for f in group_files:
+                    parsed = self._parse_excel(f)
+                    if parsed:
+                        key = Path(f.name).name
+                        result["excel_data"][key] = parsed
+            elif group_name == "csv":
+                for f in group_files:
+                    parsed = self._parse_csv(f)
+                    if parsed:
+                        key = Path(f.name).name
+                        result["csv_data"][key] = parsed
+            elif group_name == "geojson":
+                for f in group_files:
+                    parsed = self._parse_geojson(f)
+                    if parsed:
+                        key = Path(f.name).name
+                        result["shapefiles"][key] = parsed
+            elif group_name == "geotiff":
+                for f in group_files:
+                    parsed = self._parse_geotiff(f)
+                    if parsed:
+                        key = Path(f.name).name
+                        result["raster_data"][key] = parsed
+
+        return result
 
     # ================================================================
     # SHP 解析
@@ -388,8 +554,15 @@ class FileUploadHandler:
                     f"✅ {name}: 栅格 {info.get('width', '?')}×{info.get('height', '?')}"
                     f", 分辨率 {info.get('resolution', '?')}m")
 
+        # 错误
+        for err in result.get("errors", []):
+            parts.append(f"❌ {err}")
+
         if not parts:
-            return "📁 文件已收到，但无法识别的格式。"
+            return ("📁 文件已收到，但无法识别的格式。\n\n"
+                    "支持格式：SHP(.shp/.shx/.dbf/.prj) / GeoJSON(.geojson) / "
+                    "KML(.kml) / Excel(.xlsx/.xls) / CSV(.csv) / "
+                    "GeoTIFF(.tif) / ASCII(.asc) / ZIP压缩包(.zip)")
         return "📁 **文件解析结果：**\n" + "\n".join(parts)
 
 
