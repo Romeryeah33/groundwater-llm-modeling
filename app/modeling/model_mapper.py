@@ -47,6 +47,26 @@ class FloPyModelMapper:
         "bicgstab": "BICGSTAB",
     }
 
+    # 对流格式白名单
+    # MF6 6.3.0 的 gwt1adv1.f90 只认 UPSTREAM/CENTRAL/TVD；
+    # 传入其它值（例如 UTVD）会 store_error(terminate=.TRUE.) 硬终止模拟。
+    # 注意：不要给 ADV 传 ats_percel —— 6.3.0 无此选项，同样会硬终止。
+    ADV_SCHEME_MAP = {
+        "upstream": "UPSTREAM",
+        "upstream weighting": "UPSTREAM",
+        "上游加权": "UPSTREAM",
+        "一阶上游": "UPSTREAM",
+        "central": "CENTRAL",
+        "central difference": "CENTRAL",
+        "中心差分": "CENTRAL",
+        "tvd": "TVD",
+        "utvd": "TVD",              # 三阶 TVD 在 6.3.0 无对应关键字，退到 TVD
+        "ultimate": "TVD",
+        "tvd ultimate": "TVD",
+        "三阶tvd": "TVD",
+        "tvd三阶": "TVD",
+    }
+
     # ================================================================
     # 网格参数映射
     # ================================================================
@@ -158,7 +178,7 @@ class FloPyModelMapper:
     # 边界条件映射
     # ================================================================
 
-    def _infer_edge_indices(self, bc_name: str, grid: dict, layer: int = 0) -> list:
+    def _infer_edge_indices(self, bc_name: str, grid: dict, layer=None) -> list:
         """
         从边界名称推断网格边界的 IJ 索引
 
@@ -169,8 +189,16 @@ class FloPyModelMapper:
         复合方向（"northeast"→含"east"→误判为east）等产生误匹配。
         """
         name_lower = (bc_name or "").lower()
-        nrow = grid.get("nrow", 50)
-        ncol = grid.get("ncol", 50)
+        nrow = int(self._unwrap_value(grid.get("nrow"), 50) or 50)
+        ncol = int(self._unwrap_value(grid.get("ncol"), 50) or 50)
+
+        # layer=None 表示铺满所有层。多层模型若只在 layer0 设边界，
+        # 其余层将没有任何边界条件（水头无处排泄）。
+        if layer is None:
+            nlay = int(self._unwrap_value(grid.get("nlay"), 1) or 1)
+            layers = list(range(max(1, nlay)))
+        else:
+            layers = [int(layer)]
 
         # 注意：只使用有区分力的关键词，不含单字母匹配
         # 使用单词边界匹配避免 "northeast" 匹配到 "east" 等问题
@@ -199,18 +227,19 @@ class FloPyModelMapper:
 
         indices = []
 
+        def _edge(cells):
+            for lay in layers:
+                for r, c in cells:
+                    indices.append({"layer": lay, "row": r, "col": c, "period": 0})
+
         if _word_match(name_lower, west_keywords):
-            for r in range(nrow):
-                indices.append({"layer": layer, "row": r, "col": 0, "period": 0})
+            _edge([(r, 0) for r in range(nrow)])
         elif _word_match(name_lower, east_keywords):
-            for r in range(nrow):
-                indices.append({"layer": layer, "row": r, "col": ncol - 1, "period": 0})
+            _edge([(r, ncol - 1) for r in range(nrow)])
         elif _word_match(name_lower, north_keywords):
-            for c in range(ncol):
-                indices.append({"layer": layer, "row": 0, "col": c, "period": 0})
+            _edge([(0, c) for c in range(ncol)])
         elif _word_match(name_lower, south_keywords):
-            for c in range(ncol):
-                indices.append({"layer": layer, "row": nrow - 1, "col": c, "period": 0})
+            _edge([(nrow - 1, c) for c in range(ncol)])
 
         return indices
 
@@ -246,6 +275,19 @@ class FloPyModelMapper:
             # 提取参数
             params = bc.get("parameters", {})
 
+            # 浓度（可选）：携带时该包会声明 AUXILIARY CONCENTRATION，
+            # 并由 GWT 的 SSM 包引用为该边界的水流浓度
+            raw_conc = params.get("concentration")
+            if isinstance(raw_conc, dict):
+                conc = raw_conc.get("value")
+            elif raw_conc is not None:
+                try:
+                    conc = float(raw_conc)
+                except (TypeError, ValueError):
+                    conc = None
+            else:
+                conc = None
+
             # 获取网格IJK索引（如果有）
             indices = bc.get("geometry", {}).get("grid_indices", [])
 
@@ -275,7 +317,7 @@ class FloPyModelMapper:
                         packages[package_name][per].append([
                             (idx.get("layer", 0), idx.get("row", 0), idx.get("col", 0)),
                             head,
-                        ])
+                        ] + ([conc] if conc is not None else []))
                 elif sp_data:
                     for sp in sp_data:
                         per = sp.get("period", 0)
@@ -294,7 +336,7 @@ class FloPyModelMapper:
                         packages[package_name][per].append([
                             (idx.get("layer", 0), idx.get("row", 0), idx.get("col", 0)),
                             rate,
-                        ])
+                        ] + ([conc] if conc is not None else []))
                 else:
                     # 井没有位置信息 → 放在模型中心
                     center_row = grid.get("nrow", 50) // 2
@@ -302,11 +344,13 @@ class FloPyModelMapper:
                     logger.info(f"井 '{bc.get('name')}' 默认放在中心 ({center_row}, {center_col})")
                     packages[package_name][0] = [
                         [(0, center_row, center_col), rate]
+                        + ([conc] if conc is not None else [])
                     ]
 
             elif bc_type == "ghb":
-                # GHB 水头可能叫 head 或 stage，兼容两种命名
-                raw_h = params.get("head") or params.get("stage", 0.0)
+                # GHB 水头可能叫 head 或 stage，兼容两种命名。
+                # 注意 head=0.0 是合法值，不能用 `or` 短路（会被当成缺失）
+                raw_h = params["head"] if "head" in params else params.get("stage", 0.0)
                 head = raw_h.get("value", raw_h) if isinstance(raw_h, dict) else float(raw_h)
                 raw_c = params.get("conductance", 100.0); cond = raw_c.get("value", raw_c) if isinstance(raw_c, dict) else float(raw_c)
                 if indices:
@@ -317,13 +361,38 @@ class FloPyModelMapper:
                         packages[package_name][per].append([
                             (idx.get("layer", 0), idx.get("row", 0), idx.get("col", 0)),
                             head, cond,
-                        ])
+                        ] + ([conc] if conc is not None else []))
 
             elif bc_type == "rch":
                 raw_r = params.get("rate", 0.0)
                 rate = raw_r.get("value", 0.0) if isinstance(raw_r, dict) else float(raw_r)
-                if rate != 0:
-                    # 面状补给使用 Recharge 包（全区域）
+
+                if indices:
+                    # cell-by-cell 补给（如填埋场多边形）
+                    for idx in indices:
+                        per = idx.get("period", 0)
+                        if per not in packages[package_name]:
+                            packages[package_name][per] = []
+                        cellid = (idx.get("layer", 0), idx.get("row", 0), idx.get("col", 0))
+                        entry = list(cellid) + [rate]
+                        if conc is not None:
+                            entry.append(conc)
+                        packages[package_name][per].append(tuple(entry))
+                elif conc is not None:
+                    # 有浓度但没给注入位置：展开为 layer0 全网格。
+                    # 不能退化成均匀标量形式 —— 一旦声明 AUXILIARY，
+                    # MF6 会按辅助变量个数读取列表，标量形式会读错位。
+                    # 注：rate=0 且带浓度是合法的纯示踪注入场景。
+                    nrow = int(grid.get("nrow", 1) or 1)
+                    ncol = int(grid.get("ncol", 1) or 1)
+                    logger.info(
+                        f"RCH 补给浓度 {conc} 未指定注入位置，"
+                        f"展开为 layer0 全网格（{nrow}×{ncol}）"
+                    )
+                    packages[package_name][0] = [
+                        (0, r, c, rate, conc) for r in range(nrow) for c in range(ncol)
+                    ]
+                elif rate != 0:
                     packages[package_name][0] = rate
 
             elif bc_type == "riv":
@@ -338,7 +407,7 @@ class FloPyModelMapper:
                         packages[package_name][per].append([
                             (idx.get("layer", 0), idx.get("row", 0), idx.get("col", 0)),
                             stage, cond, rbot,
-                        ])
+                        ] + ([conc] if conc is not None else []))
 
         return packages
 
@@ -347,9 +416,47 @@ class FloPyModelMapper:
     # ================================================================
 
     def map_transport_params(self, json_ir: dict) -> dict:
-        """提取溶质运移参数"""
+        """提取溶质运移参数
+
+        自动检测：即使 transport.enabled 未显式设置，如果有弥散/对流/物种参数
+        或 project.model_type 为 solute_transport/reactive_transport，也自动启用。
+        """
         transport = json_ir.get("transport", {})
-        if not transport.get("enabled"):
+        project = json_ir.get("project", {})
+
+        # ── 自动启用检测 ──
+        explicit_enabled = transport.get("enabled", False)
+        # enabled 可能是 bool 或 {"value": True, ...} dict 包装
+        if isinstance(explicit_enabled, dict):
+            explicit_enabled = self._unwrap_value(explicit_enabled)
+
+        model_type_is_transport = project.get("model_type", "") in (
+            "solute_transport", "reactive_transport"
+        )
+        has_dispersion = any(
+            self._unwrap_value(transport.get("dispersion", {}).get(k)) is not None
+            for k in ("al", "trpt", "trpv", "diffc")
+        )
+        has_species = bool(transport.get("species"))
+        has_advection = bool(transport.get("advection", {}).get("scheme"))
+        has_ssm_sources = bool(transport.get("ssm_sources"))
+        # 检查是否有任何非 enabled 的 transport 内容
+        has_other_content = any(
+            k not in ("enabled",) and v
+            for k, v in transport.items()
+        )
+
+        should_enable = (
+            explicit_enabled or model_type_is_transport or has_dispersion
+            or has_species or has_advection or has_ssm_sources or has_other_content
+        )
+        logger.info(
+            f"map_transport: explicit={explicit_enabled}, mt={model_type_is_transport}, "
+            f"disp={has_dispersion}, sp={has_species}, adv={has_advection}, "
+            f"ssm={has_ssm_sources}, other={has_other_content} → enable={should_enable}"
+        )
+
+        if not should_enable:
             return {"enabled": False}
 
         disp = transport.get("dispersion", {})
@@ -358,23 +465,44 @@ class FloPyModelMapper:
             "species": transport.get("species", ["contaminant"]),
         }
 
-        al = disp.get("al", {}).get("value")
+        # 弥散参数可能写在 transport.dispersion.* 里，也可能直接写在
+        # transport.* 顶层（两种 IR 写法都见过）。只认前者会让顶层写法
+        # **静默**退化成网格尺度默认值——参数看起来给了，实际没用上。
+        def _disp(key):
+            v = self._unwrap_value(disp.get(key))
+            if v is not None:
+                return v
+            v = self._unwrap_value(transport.get(key))
+            if v is not None:
+                logger.info(f"弥散参数 {key} 取自 transport 顶层（而非 transport.dispersion）")
+            return v
+
+        al = _disp("al")
         if al is not None:
             result["al"] = al
+        else:
+            # 未指定时按网格尺度取默认值：αL ≈ 2Δx 使网格 Péclet 数 ≈ 0.5，
+            # 落在数值稳定的安全侧。固定写 10 m 在粗网格（如 20 m 以上）
+            # 会得到过大的 Péclet 数，产生振荡。
+            grid = json_ir.get("grid", {})
+            delr = np.atleast_1d(np.asarray(self._unwrap_value(grid.get("delr"), 20.0), dtype=float))
+            delc = np.atleast_1d(np.asarray(self._unwrap_value(grid.get("delc"), 20.0), dtype=float))
+            result["al"] = max(10.0, 2.0 * max(float(delr.mean()), float(delc.mean())))
+            logger.warning(f"未指定纵向弥散度 al，按网格尺度取默认值 {result['al']:.2f} m")
 
-        trpt = disp.get("trpt", {}).get("value")
+        trpt = _disp("trpt")
         if trpt is not None:
             result["trpt"] = trpt
         else:
             result["trpt"] = 0.1  # 默认 αTH/αL = 0.1
 
-        trpv = disp.get("trpv", {}).get("value")
+        trpv = _disp("trpv")
         if trpv is not None:
             result["trpv"] = trpv
         else:
             result["trpv"] = 0.01  # 默认 αTV/αL = 0.01
 
-        diffc = disp.get("diffc", {}).get("value")
+        diffc = _disp("diffc")
         if diffc is not None:
             result["diffc"] = diffc
         else:
@@ -384,20 +512,64 @@ class FloPyModelMapper:
         reaction = transport.get("reaction", {})
         if reaction.get("sorption", "none") != "none":
             result["sorption"] = reaction["sorption"]
-            kd = reaction.get("kd", {}).get("value")
+            kd = self._unwrap_value(reaction.get("kd"))
             if kd is not None:
                 result["kd"] = kd
 
         decay = reaction.get("decay", {})
         if decay.get("type", "none") != "none":
             result["decay_type"] = decay["type"]
-            rate = decay.get("first_order_rate", {}).get("value")
+            rate = self._unwrap_value(decay.get("first_order_rate"))
             if rate is not None:
                 result["decay_rate"] = rate
 
-        # 对流格式
+        # 对流格式：白名单化，避免把 6.3.0 不认的关键字写进 ADV 包导致硬终止
         adv = transport.get("advection", {})
-        result["advection_scheme"] = adv.get("scheme", "upstream")
+        raw_scheme = str(self._unwrap_value(adv.get("scheme"), "upstream")).strip().lower()
+        scheme = self.ADV_SCHEME_MAP.get(raw_scheme)
+        if scheme is None:
+            # 宽松兜底：LLM 常给出 "TVD三阶ULTIMATE" 这类复合描述
+            for key, val in self.ADV_SCHEME_MAP.items():
+                if key in raw_scheme:
+                    scheme = val
+                    break
+        if scheme is None:
+            logger.warning(
+                f"未知的对流格式 '{adv.get('scheme')}'，回退为 UPSTREAM"
+                f"（MF6 6.3.0 仅支持 UPSTREAM/CENTRAL/TVD）"
+            )
+            scheme = "UPSTREAM"
+        result["advection_scheme"] = scheme
+
+        # 孔隙度（GWT 的 MST 包必需）
+        por = self._unwrap_value(transport.get("porosity"))
+        if por is not None:
+            result["porosity"] = por
+
+        # 初始浓度
+        ic = self._unwrap_value(transport.get("initial_concentration"))
+        if ic is not None:
+            result["initial_concentration"] = ic
+
+        # 源汇项浓度（SSM）
+        ssm = transport.get("ssm_sources", [])
+        if ssm:
+            result["ssm_sources"] = ssm
+
+        # 目标 Courant 数：供 model_builder._ensure_transport_timesteps
+        # 反推 Δt 上限（MF6 6.3.0 的 ATS 不做 Courant 控制）
+        courant = self._unwrap_value(transport.get("timestep_target_courant"))
+        if courant is not None:
+            try:
+                courant = float(courant)
+                if courant > 0:
+                    result["timestep_target_courant"] = courant
+                else:
+                    logger.warning(f"timestep_target_courant={courant:g} 非正，忽略并使用默认 1.0")
+            except (TypeError, ValueError):
+                logger.warning(f"timestep_target_courant={courant!r} 无法转为数值，忽略")
+
+        logger.info(f"溶质运移已启用: al={result.get('al')}, species={result.get('species')}")
 
         return result
 
@@ -453,22 +625,79 @@ class FloPyModelMapper:
         }
 
     def _map_time_params(self, json_ir: dict) -> dict:
-        """提取时间离散参数"""
+        """提取时间离散参数
+
+        注意：LLM 有时会把时间信息写进 transport.stress_periods，而顶层
+        stress_periods 只剩一个裸整数（如 nper=10）。这里做了回退，避免
+        退化成"只算 1 天"。
+        """
         stress = json_ir.get("stress_periods", {})
-        # 防御：stress_periods 可能是字符串或列表
+
+        # 防御：stress_periods 可能是字符串 / 列表 / **裸数字**。
+        # LLM 常写 "stress_periods": 10 表示"分 10 个应力期"——按 nper 读，
+        # 否则会退化成"只算 1 个 1 天的应力期"。
         if isinstance(stress, str):
             stress = {}
+        elif isinstance(stress, bool):
+            stress = {}
+        elif isinstance(stress, (int, float)):
+            stress = {"nper": int(stress)}
         if isinstance(stress, list):
             stress = stress[0] if stress else {}
         if not isinstance(stress, dict):
             stress = {}
+
+        # 回退到 transport.stress_periods。**两种情况都要回退**：
+        #   1) 顶层连 nper 都没有（缺失 / 非法）
+        #   2) 顶层只带 nper、没有 perlen/nstp/period_data
+        # 第 2 种正是 East Texas 的形态：顶层是裸整数 10，真实的时间信息
+        # {nper:10, perlen:15000} 被 LLM 塞进了 transport.stress_periods。
+        # 只看 nper 判断的话这里不会回退，perlen 就退化成 1 天。
+        fallback = (json_ir.get("transport") or {}).get("stress_periods")
+        if isinstance(fallback, dict):
+            _TIME_KEYS = ("perlen", "nstp", "tsmult", "period_data")
+            no_nper = not stress.get("nper")
+            no_time = not any(stress.get(k) for k in _TIME_KEYS)
+            if (no_nper or no_time) and fallback.get("nper"):
+                logger.warning(
+                    f"顶层 stress_periods 缺少 "
+                    f"{'nper' if no_nper else 'perlen/nstp/period_data'}，"
+                    f"从 transport.stress_periods 补齐时间信息"
+                )
+                merged = dict(fallback)
+                # 顶层已显式给出的键优先
+                merged.update({k: v for k, v in stress.items() if v})
+                stress = merged
+
+        nper = int(self._unwrap_value(stress.get("nper"), 1) or 1)
+        perlen = float(self._unwrap_value(stress.get("perlen"), 1.0) or 1.0)
+        nstp = int(self._unwrap_value(stress.get("nstp"), 1) or 1)
+        tsmult = float(self._unwrap_value(stress.get("tsmult"), 1.0) or 1.0)
+
+        period_data = stress.get("period_data") or []
+        if not period_data:
+            # 关键：由 nper/perlen/nstp 合成，而不是退化成单个 1 天步长
+            period_data = [
+                {"perlen": perlen, "nstp": nstp, "tsmult": tsmult}
+                for _ in range(nper)
+            ]
+        elif len(period_data) != nper:
+            logger.warning(
+                f"period_data 长度({len(period_data)}) != nper({nper})，以 period_data 为准"
+            )
+            nper = len(period_data)
+
+        total = sum(float(pd.get("perlen", 1.0) or 1.0) for pd in period_data)
+        logger.info(
+            f"时间离散: nper={nper}, 总时长={total:g} d, "
+            f"总时间步={sum(int(pd.get('nstp', 1) or 1) for pd in period_data)}"
+        )
+
         return {
-            "nper": stress.get("nper", 1),
-            "perlen": stress.get("perlen", 1.0),
-            "steady_state": stress.get("steady_state", True),
-            "period_data": stress.get("period_data", [
-                {"perlen": 1.0, "nstp": 1, "tsmult": 1.0},
-            ]),
+            "nper": nper,
+            "perlen": perlen,
+            "steady_state": bool(stress.get("steady_state", True)),
+            "period_data": period_data,
         }
 
 

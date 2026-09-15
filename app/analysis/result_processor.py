@@ -68,12 +68,30 @@ class ResultProcessor:
     def extract_concentration_field(
         self, gwt, layer: int = 0, totim: float = None
     ) -> np.ndarray:
-        """提取指定层/时刻的浓度场"""
+        """提取指定层/时刻的浓度场
+
+        Args:
+            gwt: ModflowGwt 模型对象
+            layer: 目标层索引 (0-based)
+            totim: 指定时刻。为 None 时取最后一个时间步的结果。
+
+        Returns:
+            2D 浓度场 (nrow, ncol)
+        """
         conc_obj = gwt.output.concentration()
         if totim is not None:
             data = conc_obj.get_data(totim=totim)
         else:
-            data = conc_obj.get_data()
+            # 取最后一个时间步
+            times = conc_obj.get_times()
+            if times is not None and len(times) > 0:
+                data = conc_obj.get_data(totim=times[-1])
+            else:
+                data = conc_obj.get_data()
+
+        # 处理多维数据: (nlay, nrow, ncol) 或 (ntimes, nlay, nrow, ncol)
+        if data.ndim == 4:
+            data = data[-1]  # 取最后一个时间步
         if data.ndim >= 3:
             return data[layer]
         return data

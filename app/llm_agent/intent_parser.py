@@ -198,6 +198,11 @@ class IntentParser:
 
                 # ── 检查标准名是否已经是带数组索引的完整路径 ──
                 # 如 "boundary_conditions[0].parameters.stage" → 直接使用
+                # 先初始化，避免索引路径分支下 matched_name/matches 未定义
+                # （数组路径是 LLM 直接给出的完整 IR 路径，未经语义库匹配，
+                #   confidence 因此退化为 medium）
+                matches = []
+                matched_name = name
                 if re.search(r'\[\d+\]', name) and '.' in name:
                     ir_path = name
                     # 验证顶层键有效
@@ -393,6 +398,19 @@ class IntentParser:
                         "value": entity.get("rbot", float(stage_val or 0) - 1.0),
                         "unit": "m", "source": "inferred",
                     }
+                elif bc_type == "rch":
+                    if rate_val is not None:
+                        bc_entry["parameters"]["rate"] = {
+                            "value": float(rate_val), "unit": entity.get("unit", "m/d"),
+                            "source": "user_input",
+                        }
+                    # 补给浓度
+                    conc_val = entity.get("concentration")
+                    if conc_val is not None:
+                        bc_entry["parameters"]["concentration"] = {
+                            "value": float(conc_val), "unit": entity.get("conc_unit", "ppm"),
+                            "source": "user_input",
+                        }
 
                 # 使用特殊键 _boundary_entry_N 来避免重复
                 idx = len([k for k in normalized if k.startswith("_boundary_entry_")])
@@ -402,6 +420,20 @@ class IntentParser:
                     "source": "user_input",
                     "confidence": "high",
                 }
+
+        # ── 自动启用溶质运移 ──
+        # 当 model_type 为 solute_transport 或 reactive_transport 时，
+        # 或检测到污染物/弥散/对流参数时，自动设置 transport.enabled = true
+        model_type_val = normalized.get("project.model_type", {}).get("value")
+        need_transport = (
+            model_type_val in ("solute_transport", "reactive_transport")
+            or any(k.startswith("transport.") or k == "_contaminant" for k in normalized)
+        )
+        if need_transport and "transport.enabled" not in normalized:
+            normalized["transport.enabled"] = {
+                "value": True, "unit": "",
+                "source": "inferred", "confidence": "high",
+            }
 
         return normalized
 

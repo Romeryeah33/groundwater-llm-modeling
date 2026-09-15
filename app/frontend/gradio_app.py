@@ -553,6 +553,13 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
         return empty_fig, f"<p style='color:red'>参数校验发现 {val_result['error_count']} 个错误:</p><pre>{issues}</pre>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 
     monitor.step("Step 3/3: FloPy 建模与 MODFLOW 6 模拟")
+
+    # ── 诊断日志：建模前 dump IR 关键信息 ──
+    logger.info(f"[RUN_MODEL] project={json_ir.get('project', {})}")
+    logger.info(f"[RUN_MODEL] transport keys={list(json_ir.get('transport', {}).keys())}")
+    logger.info(f"[RUN_MODEL] transport.enabled={json_ir.get('transport', {}).get('enabled')}")
+    logger.info(f"[RUN_MODEL] transport={json_ir.get('transport', {})}")
+
     workspace = settings.workspace_dir / f"run_{sid}" if sid else settings.workspace_dir / "run_default"
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -724,10 +731,37 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
 
                 if gwt:
                     try:
-                        conc = rp.extract_concentration_field(gwt, layer=0)
-                        plume_fig = viz_eng.plot_plume_evolution([conc], [1.0], delr, delc, threshold=0.01, n_cols=1)
-                    except Exception:
-                        pass
+                        # 真实模拟总时长直接读 .ucn 的最后一个时刻。
+                        # 旧代码读 json_ir["stress_periods"]["perlen"]，而顶层
+                        # stress_periods 常被 LLM 写成裸整数（East Texas 就是 10），
+                        # 于是时间轴永远显示 1 d，看起来像没跑动。
+                        conc_obj = gwt.output.concentration()
+                        times = conc_obj.get_times()
+                        times = [float(t) for t in np.atleast_1d(times)] if times is not None else []
+
+                        if len(times) >= 2:
+                            # 取 4~6 个时刻画演化序列，而不是只画最后一张快照——
+                            # 单张快照看不出污染羽在移动
+                            n_frames = min(6, len(times))
+                            idx = np.unique(
+                                np.linspace(0, len(times) - 1, n_frames).astype(int)
+                            )
+                            frames = [
+                                rp.extract_concentration_field(gwt, layer=0, totim=times[i])
+                                for i in idx
+                            ]
+                            frame_times = [times[i] for i in idx]
+                        else:
+                            frames = [rp.extract_concentration_field(gwt, layer=0)]
+                            frame_times = times[-1:] or [1.0]
+
+                        plume_fig = viz_eng.plot_plume_evolution(
+                            frames, frame_times, delr, delc,
+                            threshold=0.01, n_cols=min(3, len(frames)),
+                        )
+                    except Exception as e:
+                        logger.warning(f"污染羽演化图绘制失败: {e}")
+                        logger.warning(traceback.format_exc())
 
             except Exception as e:
                 logger.error(f"结果提取失败: {e}")

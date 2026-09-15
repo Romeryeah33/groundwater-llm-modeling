@@ -142,10 +142,12 @@ NER_EXTRACTION_PROMPT = """从以下对话中提取地下水建模相关的命�
 当用户描述边界条件时（如"西侧定水头100m，东侧定水头95m"），每个边界分别提取为一个实体：
 - entity_type="boundary_condition_full"
 - position="边界位置"（west/east/north/south 或 西/东/北/南）
-- bc_type="边界类型"（chd=定水头, ghb=通用水头, wel=井, riv=河流, drn=排水沟）
+- bc_type="边界类型"（chd=定水头, ghb=通用水头, wel=井, riv=河流, drn=排水沟, rch=补给）
 - head_value=水头值（如果是定水头边界，提取数值）
 - stage_value=水位值（如果是河流边界）
-- rate_value=流量值（如果是井边界）
+- rate_value=流量值（如果是井边界）或补给速率（如果是补给边界，单位 m/d）
+- concentration=补给浓度值（如果是补给边界且提到了污染物浓度，单位 ppm）
+- conc_unit=浓度单位
 - unit="m"（水头/水位的单位）
 
 示例：
@@ -156,6 +158,9 @@ NER_EXTRACTION_PROMPT = """从以下对话中提取地下水建模相关的命�
 {{"entity_type": "boundary_condition_full", "position": "east", "bc_type": "chd", "head_value": 95, "unit": "m"}},
 {{"entity_type": "boundary_condition_full", "position": "north", "bc_type": "no_flow", "head_value": null}},
 {{"entity_type": "boundary_condition_full", "position": "south", "bc_type": "no_flow", "head_value": null}}
+
+用户说"填埋场区域补给浓度为20000ppm" →
+{{"entity_type": "boundary_condition_full", "position": "landfill", "bc_type": "rch", "rate_value": 0.001, "unit": "m/d", "concentration": 20000, "conc_unit": "ppm"}}
 
 注意：如果用户提到了某侧是"零流量边界"或"隔水边界"，bc_type 设为 "no_flow"。
 
@@ -182,7 +187,8 @@ IR_GENERATION_PROMPT = """根据对话历史和已提取的参数信息，生成
 2. 确保所有参数值在物理合理范围内
 3. 确保单位已标准化（长度→m，时间→d）
 4. 对于不确定的信息，设置 value: null 并标记 source: "uncertain"
-5. 如果用户提到了污染物或溶质运移，设置 transport.enabled = true
+5. 如果用户提到了污染物或溶质运移，设置 transport.enabled = true，并在 transport.species 中列出污染物名称
+6. 如果用户提到了补给浓度（如"填埋场补给浓度20000ppm"），在 boundary_conditions 中添加 rch 类型边界，包含 parameters.rate 和 parameters.concentration
 6. 边界条件需要构建完整的 boundary_conditions 数组，包括 type、name、参数和位置信息
 
 只返回合并后的完整 JSON IR，不要加任何解释。"""
