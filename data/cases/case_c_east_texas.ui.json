@@ -1,0 +1,799 @@
+{
+  "ir_version": "1.0",
+  "project": {
+    "name": "EastTexas",
+    "model_type": "solute_transport"
+  },
+  "domain": {
+    "x_range": [
+      0,
+      5000
+    ],
+    "y_range": [
+      0,
+      4000
+    ]
+  },
+  "grid": {
+    "nrow": 103,
+    "ncol": 218,
+    "nlay": 2,
+    "top": 230,
+    "bottom": 175
+  },
+  "aquifer": {
+    "parameters": {
+      "hk": {
+        "value": 5.5,
+        "unit": "m/d",
+        "source": "user_input"
+      },
+      "ss": {
+        "value": 1e-05,
+        "unit": "1/m",
+        "source": "user_input"
+      },
+      "porosity": {
+        "value": 0.2,
+        "unit": "dimensionless",
+        "source": "user_input"
+      },
+      "vka": {
+        "value": 0.55,
+        "unit": "m/d",
+        "source": "patched"
+      },
+      "sy": {
+        "value": 0.2,
+        "unit": "dimensionless",
+        "source": "user_input"
+      },
+      "initial_conditions": {
+        "value": "top_elevation",
+        "unit": "",
+        "source": "user_input"
+      },
+      "solver_type": {
+        "value": "PCG",
+        "unit": "dimensionless",
+        "source": "user_input"
+      },
+      "hclose": {
+        "value": 0.01,
+        "unit": "m",
+        "source": "user_input"
+      },
+      "diffc": {
+        "value": 1e-08,
+        "unit": "m2/d",
+        "source": "user_input"
+      },
+      "source_concentration": {
+        "value": 20000,
+        "unit": "ppm",
+        "source": "user_input"
+      },
+      "perlen": {
+        "value": 1500,
+        "unit": "d",
+        "source": "user_input"
+      },
+      "advection_scheme": {
+        "value": "TVD三阶ULTIMATE",
+        "unit": "",
+        "source": "user_input"
+      },
+      "启用对流包": {
+        "value": true,
+        "unit": "",
+        "source": "user_input"
+      },
+      "启用弥散包": {
+        "value": true,
+        "unit": "",
+        "source": "user_input"
+      },
+      "启用源汇混合包": {
+        "value": true,
+        "unit": "",
+        "source": "user_input"
+      },
+      "启用运移观测包": {
+        "value": true,
+        "unit": "",
+        "source": "user_input"
+      },
+      "nstp": {
+        "value": 1,
+        "unit": "",
+        "source": "user_input"
+      },
+      "adv_package_enabled": {
+        "value": true,
+        "unit": "",
+        "source": "user_input"
+      },
+      "dsp_package_enabled": {
+        "value": true,
+        "unit": "",
+        "source": "user_input"
+      },
+      "ssm_package_enabled": {
+        "value": true,
+        "unit": "",
+        "source": "user_input"
+      },
+      "obs_package_enabled": {
+        "value": true,
+        "unit": "",
+        "source": "user_input"
+      },
+      "mass_unit": {
+        "value": "kg",
+        "unit": "",
+        "source": "user_input"
+      },
+      "concentration_unit": {
+        "value": "ppm",
+        "unit": "",
+        "source": "user_input"
+      }
+    },
+    "type": "unconfined"
+  },
+  "boundary_conditions": [
+    {
+      "type": "ghb",
+      "name": "south_boundary",
+      "position": "south",
+      "parameters": {
+        "conductance": {
+          "value": 100.0,
+          "unit": "m²/d",
+          "source": "inferred"
+        },
+        "stage": {
+          "value": 212,
+          "unit": "m",
+          "source": "user_input"
+        }
+      },
+      "geometry": {
+        "type": "edge",
+        "position": "south"
+      }
+    },
+    {
+      "type": "ghb",
+      "name": "east_boundary",
+      "position": "east",
+      "parameters": {
+        "conductance": {
+          "value": 100.0,
+          "unit": "m²/d",
+          "source": "inferred"
+        },
+        "stage": {
+          "value": 208,
+          "unit": "m",
+          "source": "user_input"
+        }
+      },
+      "geometry": {
+        "type": "edge",
+        "position": "east"
+      }
+    },
+    {
+      "type": "rch",
+      "name": "landfill_recharge",
+      "parameters": {
+        "rate": {
+          "value": 0.0001,
+          "unit": "m/d",
+          "source": "patched"
+        },
+        "concentration": {
+          "value": 20000.0,
+          "unit": "mg/L",
+          "source": "patched"
+        }
+      },
+      "geometry": {
+        "shape": "polygon",
+        "grid_indices": [
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 18,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 19,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 20,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 21,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 22,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 23,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 24,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 25,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 26,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 18,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 19,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 20,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 21,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 22,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 23,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 24,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 25,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 26,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 10,
+            "col": 18,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 10,
+            "col": 19,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 10,
+            "col": 20,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 10,
+            "col": 21,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 10,
+            "col": 22,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 10,
+            "col": 23,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 10,
+            "col": 24,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 10,
+            "col": 25,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 10,
+            "col": 26,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 11,
+            "col": 18,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 11,
+            "col": 19,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 11,
+            "col": 20,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 11,
+            "col": 21,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 11,
+            "col": 22,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 11,
+            "col": 23,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 11,
+            "col": 24,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 11,
+            "col": 25,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 11,
+            "col": 26,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 12,
+            "col": 18,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 12,
+            "col": 19,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 12,
+            "col": 20,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 12,
+            "col": 21,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 12,
+            "col": 22,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 12,
+            "col": 23,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 12,
+            "col": 24,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 12,
+            "col": 25,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 12,
+            "col": 26,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 13,
+            "col": 18,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 13,
+            "col": 19,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 13,
+            "col": 20,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 13,
+            "col": 21,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 13,
+            "col": 22,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 13,
+            "col": 23,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 13,
+            "col": 24,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 13,
+            "col": 25,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 13,
+            "col": 26,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 14,
+            "col": 18,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 14,
+            "col": 19,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 14,
+            "col": 20,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 14,
+            "col": 21,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 14,
+            "col": 22,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 14,
+            "col": 23,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 14,
+            "col": 24,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 14,
+            "col": 25,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 14,
+            "col": 26,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 15,
+            "col": 18,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 15,
+            "col": 19,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 15,
+            "col": 20,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 15,
+            "col": 21,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 15,
+            "col": 22,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 15,
+            "col": 23,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 15,
+            "col": 24,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 15,
+            "col": 25,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 15,
+            "col": 26,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 16,
+            "col": 18,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 16,
+            "col": 19,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 16,
+            "col": 20,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 16,
+            "col": 21,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 16,
+            "col": 22,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 16,
+            "col": 23,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 16,
+            "col": 24,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 16,
+            "col": 25,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 16,
+            "col": 26,
+            "period": 0
+          }
+        ]
+      }
+    }
+  ],
+  "stress_periods": 10,
+  "initial_conditions": {
+    "type": "specified",
+    "head": 215.0
+  },
+  "solver": {
+    "type": "PCG",
+    "parameters": {
+      "hclose": {
+        "value": 0.001,
+        "unit": "m",
+        "source": "patched"
+      },
+      "damp": {
+        "value": 0.9,
+        "unit": "dimensionless",
+        "source": "inferred"
+      },
+      "max_iter": {
+        "value": 100,
+        "unit": "dimensionless",
+        "source": "inferred"
+      }
+    },
+    "name": "PCG"
+  },
+  "transport": {
+    "enabled": true,
+    "dispersion": {
+      "trpt": {
+        "value": 0.2,
+        "unit": "dimensionless",
+        "source": "user_input"
+      },
+      "trpv": {
+        "value": 0.1,
+        "unit": "dimensionless",
+        "source": "user_input"
+      }
+    },
+    "al": {
+      "value": 40.0,
+      "unit": "m"
+    },
+    "porosity": {
+      "value": 0.2,
+      "unit": "dimensionless"
+    },
+    "stress_periods": {
+      "nper": 10,
+      "period_data": [
+        {
+          "perlen": 1500.0,
+          "nstp": 30,
+          "tsmult": 1.0
+        },
+        {
+          "perlen": 1500.0,
+          "nstp": 30,
+          "tsmult": 1.0
+        },
+        {
+          "perlen": 1500.0,
+          "nstp": 30,
+          "tsmult": 1.0
+        },
+        {
+          "perlen": 1500.0,
+          "nstp": 30,
+          "tsmult": 1.0
+        },
+        {
+          "perlen": 1500.0,
+          "nstp": 30,
+          "tsmult": 1.0
+        },
+        {
+          "perlen": 1500.0,
+          "nstp": 30,
+          "tsmult": 1.0
+        },
+        {
+          "perlen": 1500.0,
+          "nstp": 30,
+          "tsmult": 1.0
+        },
+        {
+          "perlen": 1500.0,
+          "nstp": 30,
+          "tsmult": 1.0
+        },
+        {
+          "perlen": 1500.0,
+          "nstp": 30,
+          "tsmult": 1.0
+        },
+        {
+          "perlen": 1500.0,
+          "nstp": 30,
+          "tsmult": 1.0
+        }
+      ]
+    }
+  }
+}
