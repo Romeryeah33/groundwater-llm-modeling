@@ -339,9 +339,11 @@ class IntentParser:
                 # 完整边界条件: {entity_type: "boundary_condition_full", position: "west", bc_type: "chd", head_value: 100}
                 position = entity.get("position", "").lower().strip()
                 bc_type = entity.get("bc_type", "").lower().strip()
-                head_val = entity.get("head_value")
-                stage_val = entity.get("stage_value")
-                rate_val = entity.get("rate_value")
+                # 先收敛成标量再往下走：LLM 会把"水头从212m变到208m再变到214m"
+                # 抽成数组，这里统一取第一个，避免下游 float(list) 崩掉整条链路
+                head_val = self._scalar(entity.get("head_value"))
+                stage_val = self._scalar(entity.get("stage_value"))
+                rate_val = self._scalar(entity.get("rate_value"))
 
                 if not position or not bc_type:
                     continue
@@ -365,13 +367,13 @@ class IntentParser:
 
                 if bc_type == "chd" and head_val is not None:
                     bc_entry["parameters"]["head"] = {
-                        "value": float(head_val), "unit": entity.get("unit", "m"),
+                        "value": head_val, "unit": entity.get("unit", "m"),
                         "source": "user_input",
                     }
                 elif bc_type == "ghb":
                     if head_val is not None:
                         bc_entry["parameters"]["head"] = {
-                            "value": float(head_val), "unit": entity.get("unit", "m"),
+                            "value": head_val, "unit": entity.get("unit", "m"),
                             "source": "user_input",
                         }
                     bc_entry["parameters"]["conductance"] = {
@@ -381,13 +383,13 @@ class IntentParser:
                 elif bc_type == "wel":
                     if rate_val is not None:
                         bc_entry["parameters"]["rate"] = {
-                            "value": float(rate_val), "unit": entity.get("unit", "m³/d"),
+                            "value": rate_val, "unit": entity.get("unit", "m³/d"),
                             "source": "user_input",
                         }
                 elif bc_type == "riv":
                     if stage_val is not None:
                         bc_entry["parameters"]["stage"] = {
-                            "value": float(stage_val), "unit": entity.get("unit", "m"),
+                            "value": stage_val, "unit": entity.get("unit", "m"),
                             "source": "user_input",
                         }
                     bc_entry["parameters"]["conductance"] = {
@@ -401,14 +403,14 @@ class IntentParser:
                 elif bc_type == "rch":
                     if rate_val is not None:
                         bc_entry["parameters"]["rate"] = {
-                            "value": float(rate_val), "unit": entity.get("unit", "m/d"),
+                            "value": rate_val, "unit": entity.get("unit", "m/d"),
                             "source": "user_input",
                         }
                     # 补给浓度
-                    conc_val = entity.get("concentration")
+                    conc_val = self._scalar(entity.get("concentration"))
                     if conc_val is not None:
                         bc_entry["parameters"]["concentration"] = {
-                            "value": float(conc_val), "unit": entity.get("conc_unit", "ppm"),
+                            "value": conc_val, "unit": entity.get("conc_unit", "ppm"),
                             "source": "user_input",
                         }
 
@@ -626,6 +628,36 @@ class IntentParser:
         if isinstance(val, (list, dict)) and len(val) == 0:
             return True
         return False
+
+    @staticmethod
+    def _scalar(v):
+        """把 LLM 可能给出的 list/dict 形态收敛成单个数值；取不到就返回 None
+
+        LLM 会把"水头从212m线性变化到208m再变到214m"抽成
+        `head_value=[212, 208, 214]`，直接 float() 会 TypeError，
+        把整条对话链路崩掉（normalize_entities 抛异常 → parse 失败 →
+        IR 退化成空 dict → 用户在界面上看到"什么都没抽到"）。
+
+        dict 形态（{"value":..., "unit":...}）同理要解包。
+        数组里取第一个数值，并告警——多值本身是"用户描述了一个变化过程"
+        的信号，是否要展开成逐格边界应由上层决定，这里只保证不崩。
+        """
+        if isinstance(v, dict):
+            v = v.get("value")
+        if isinstance(v, (list, tuple)):
+            nums = [x for x in v
+                    if isinstance(x, (int, float)) and not isinstance(x, bool)]
+            if not nums:
+                return None
+            if len(nums) > 1:
+                logger.warning(f"参数值为数组 {v}，只取第一个 {nums[0]}")
+            v = nums[0]
+        if v is None or isinstance(v, bool):
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _has_value(v) -> bool:
