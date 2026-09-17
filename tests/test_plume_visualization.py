@@ -547,8 +547,116 @@ check("8.5 上限小于下限时自动纠正", _V > _v, f"vmin={_v} vmax={_V}")
 
 
 # ============================================================
-# 汇总
+# 9. 色标上下限必须"显式确认"后才重绘（不能逐字符触发）
+#
+# 曾经的 bug：三个控件（自动复选框 + 两个浓度框）都挂 .change，而
+# gr.Number.change 是**逐字符**触发的 —— 用户键入 "300"，敲下 "3" 的那一刻就
+# 开始跑一次计算，必须等结果刷出来才能接着键入 "0"。
+# 这个 bug 能存活同样是**因为没测试**：纯函数全绿，坏的是事件接线。
+# 所以这里断言的不是"某个函数返回什么"，而是**组件图上有没有那条边**。
 # ============================================================
+section("9. 色标上下限「确定重绘」接线")
+
+import app.frontend.gradio_app as _ga
+from app.frontend.gradio_app import _on_plume_apply
+
+# ---- 9.1~9.4 处理器契约（直接用 7 节的假 gwt，不跑 mf6）----
+_APPLY_SID = "test_plume_apply_lock"          # 刻意避开真实会话 'default'
+_ga._result_cache[_APPLY_SID] = {
+    "gwt": _FakeGwt(), "times": TIMES, "layer": 0,
+    "delr": [20.0] * 3, "delc": [20.0] * 2,
+    "c_range": (100.0, 1000.0), "velocity": None, "basemap": {},
+}
+
+_out = _on_plume_apply(500.0, 500, False, 100, 900, _APPLY_SID)
+check("9.1 处理器返回 6 元组（含两个时间控件回写）", len(_out) == 6, f"len={len(_out)}")
+_fig9, _st9, _s9, _n9, _lo9, _hi9 = _out
+check("9.2 点一次即应用上下限两个数",
+      abs(_lo9 - 100.0) < 1e-9 and abs(_hi9 - 900.0) < 1e-9, f"{_lo9},{_hi9}")
+check("9.3 状态行回读生效色标", "100" in _st9 and "900" in _st9, _st9[:80])
+check("9.4 画出了图且时刻取自数字框", _fig9 is not None and "500" in _st9, _st9[:60])
+
+# 无结果时不得清空用户刚键入的值（否则用户输入 300 后点确定，框会被抹掉）
+_, _st9b, _, _, _lo9b, _hi9b = _on_plume_apply(500.0, 500, False, 300, 3000,
+                                               "test_no_such_sid_for_apply")
+check("9.5 无结果时保留用户输入的下限", _lo9b == 300, f"{_lo9b}")
+check("9.6 无结果时保留用户输入的上限",
+      _hi9b == 3000 and "还没有可重绘的结果" in _st9b, f"{_hi9b} {_st9b[:40]}")
+_ga._result_cache.pop(_APPLY_SID, None)
+
+# ---- 9.7~9.10 组件图上的边：不许有任何 .change 读浓度上下限 ----
+_demo = _ga.create_ui()
+
+# 先按标签把这两个组件对象捞出来。Gradio 的 BlockFunction.inputs 存的是**组件对象**
+# 本身（不是 id），所以身份比较即可。这一步必须成立，否则下面的扫描会因为
+# "输入一个都对不上"而空过 —— 空过的测试比没有测试更坏（本节初版就踩了这个坑：
+# 判据拿 inputs 当 id 列表解析，永远得空集，接回坏边也报绿）。
+_lbl2blk = {}
+for _blk in _demo.blocks.values():
+    _lb = getattr(_blk, "label", None)
+    if _lb:
+        _lbl2blk.setdefault(_lb, _blk)
+_vmin_blk = _lbl2blk.get("浓度下限 (mg/L)")
+_vmax_blk = _lbl2blk.get("浓度上限 (mg/L)")
+check("9.7 能在组件图里按标签定位浓度上下限框",
+      _vmin_blk is not None and _vmax_blk is not None,
+      f"已见标签={sorted(_lbl2blk)[:6]}...")
+
+
+def _scan_plume_events(_blocks_demo):
+    """扫组件图。
+
+    Returns:
+        (change 事件数, 以浓度框为**触发源**的 change 事件列表, 确定按钮绑定数)
+
+    判据取"触发源"而不是"输入"：`plume_auto_range.change` 的 inputs 里也含这两个
+    框（处理器要读它们），那是**单击复选框**这一下、不涉及逐字符键入，是合法的。
+    真正要消灭的只有"事件挂在浓度框自身"这条边 —— 键入 "3" 就触发它的那条。
+    """
+    _n_chg, _bad, _n_apply = 0, [], 0
+    for _fn in _blocks_demo.fns.values():
+        if getattr(_fn.fn, "__name__", "") == "_on_plume_apply":
+            _n_apply += 1
+        for _t in (getattr(_fn, "targets", None) or []):
+            _tgt = _t[0] if isinstance(_t, (list, tuple)) and _t else _t
+            _ev = _t[1] if isinstance(_t, (list, tuple)) and len(_t) > 1 else None
+            _ename = getattr(_ev, "event_name", None) or str(_ev)
+            if "change" not in str(_ename):
+                continue
+            _n_chg += 1
+            _blk = _blocks_demo.blocks.get(_tgt) if isinstance(_tgt, int) else _tgt
+            if _blk is _vmin_blk or _blk is _vmax_blk:
+                _bad.append((getattr(_fn.fn, "__name__", "?"),
+                             getattr(_blk, "label", None), str(_ename)))
+    return _n_chg, _bad, _n_apply
+
+
+_n_change, _offenders, _n_apply_bind = _scan_plume_events(_demo)
+check("9.8 组件图里确实扫到了 change 事件（防检查空过）",
+      _n_change >= 1, f"n_change={_n_change}")
+check("9.9 「确定重绘」已挂在按钮/回车/复选框共 4 条路径上",
+      _n_apply_bind == 4, f"n_apply_bind={_n_apply_bind}")
+check("9.10 没有任何 .change 事件挂在浓度框自身上（逐字符重算的根因）",
+      not _offenders, f"offenders={_offenders}")
+
+# 9.11 判据自检：把坏边原样接回去（复用 vmin 上那条 submit 绑定的输入/输出），
+# 扫描必须报警。没有这一步，9.10 只是个"看起来在检查"的绿勾。
+_vmin_binding = None
+for _fn in _demo.fns.values():
+    for _t in (getattr(_fn, "targets", None) or []):
+        if (isinstance(_t, (list, tuple)) and len(_t) > 1 and str(_t[1]) == "submit"
+                and _demo.blocks.get(_t[0]) is _vmin_blk):
+            _vmin_binding = _fn
+with _demo:
+    _vmin_blk.change(_ga._on_plume_number,
+                     list(_vmin_binding.inputs), list(_vmin_binding.outputs))
+_n_change2, _offenders2, _ = _scan_plume_events(_demo)
+check("9.11 判据自检：接回坏边后必须报警（否则 9.10 是空过的）",
+      bool(_offenders2) and _n_change2 == _n_change + 1,
+      f"n_change {_n_change}->{_n_change2} offenders={_offenders2}")
+
+del _demo
+
 print(f"\n{'=' * 60}")
 total = passed + failed
 pct = 100.0 * passed / total if total > 0 else 0

@@ -374,6 +374,26 @@ def _on_plume_number(num_t, auto_range, vmin_in, vmax_in, sid):
     return fig, status, gr.update(value=num_t), vmin_o, vmax_o
 
 
+def _on_plume_apply(slider_t, num_t, auto_range, vmin_in, vmax_in, sid):
+    """
+    「确定重绘」：把色标上下限（连同时刻）一次性应用后重绘。
+
+    为什么需要这个按钮：`gr.Number.change` 是**逐字符**触发的 —— 想输入 `300`，
+    键入 `3` 的那一刻就开始跑一次计算，用户必须等这次结果回来才能接着键入 `0`。
+    改成显式确认后，键入过程完全不触发，按一次算一次。
+    （数字框里按回车走同一个处理器：回车是明确的"输入完毕"动作，不会误触发。）
+
+    时刻取值：数字框有有效值就用它，否则用滑块位置 —— 滑块 `release` 会把位置
+    回写进数字框，两者本就同步。
+    """
+    t = num_t if isinstance(num_t, (int, float)) else slider_t
+    fig, status, vmin_o, vmax_o = _render_plume(t, auto_range,
+                                                vmin_in, vmax_in, sid)
+    # 同步回写两个时间控件，与滑块/数字框那两条路径保持同一行为
+    return (fig, status,
+            gr.update(value=t), gr.update(value=t), vmin_o, vmax_o)
+
+
 def _sync_plume_controls(sid: str):
     """
     运行结束后同步交互控件：滑块范围来自本次运行的输出时刻，
@@ -1544,10 +1564,18 @@ def create_ui():
                         info="可直接输入，例如 360")
                 with gr.Row():
                     plume_auto_range = gr.Checkbox(value=True, label="自动色标范围")
-                    plume_vmin = gr.Number(value=None, label="浓度下限 (mg/L)")
-                    plume_vmax = gr.Number(value=None, label="浓度上限 (mg/L)")
+                    plume_vmin = gr.Number(
+                        value=None, label="浓度下限 (mg/L)",
+                        info="填好后点右侧「确定重绘」或按回车")
+                    plume_vmax = gr.Number(
+                        value=None, label="浓度上限 (mg/L)",
+                        info="填好后点右侧「确定重绘」或按回车")
+                    plume_apply_btn = gr.Button("✅ 确定重绘", variant="primary",
+                                                scale=0)
                 plume_single_plot = gr.Plot(label="污染羽单时刻")
-                plume_status = gr.Markdown("完成建模后可在此选择时刻与浓度范围。")
+                plume_status = gr.Markdown(
+                    "完成建模后可在此选择时刻与浓度范围；"
+                    "上下限输入框只在点「确定重绘」或按回车时才重绘。")
             with gr.TabItem("📈 过程分析"):
                 process_plot = gr.Plot(label="主控过程贡献")
             with gr.TabItem("🎨 图件修改"):
@@ -1613,7 +1641,11 @@ def create_ui():
             [plume_time_slider, plume_time_num, plume_vmin, plume_vmax,
              plume_single_plot, plume_status])
 
-        # 污染羽交互控件：滑块 ⇄ 数字框双向同步，色标范围改动即重绘
+        # 污染羽交互控件：滑块 ⇄ 数字框双向同步
+        # 色标上下限**不挂 .change** —— gr.Number.change 逐字符触发：键入 300 时
+        # 敲下 "3" 就开始算，用户得等这一次结果回来才能接着键入 "0"。改为显式确认
+        # （按钮点击 / 输入框回车）。复选框也走同一个处理器，单击一次即生效、不会
+        # 逐字符误触发。全部不绑 .change 也顺带消除了"程序回写输入框再触发事件"的回环。
         plume_time_slider.release(
             _on_plume_slider,
             [plume_time_slider, plume_auto_range, plume_vmin, plume_vmax, sid_state],
@@ -1622,11 +1654,14 @@ def create_ui():
             _on_plume_number,
             [plume_time_num, plume_auto_range, plume_vmin, plume_vmax, sid_state],
             [plume_single_plot, plume_status, plume_time_slider, plume_vmin, plume_vmax])
-        for _w in (plume_auto_range, plume_vmin, plume_vmax):
-            _w.change(
-                _on_plume_number,
-                [plume_time_num, plume_auto_range, plume_vmin, plume_vmax, sid_state],
-                [plume_single_plot, plume_status, plume_time_slider, plume_vmin, plume_vmax])
+        for _ev in (plume_apply_btn.click, plume_vmin.submit, plume_vmax.submit,
+                    plume_auto_range.change):
+            _ev(
+                _on_plume_apply,
+                [plume_time_slider, plume_time_num, plume_auto_range,
+                 plume_vmin, plume_vmax, sid_state],
+                [plume_single_plot, plume_status, plume_time_slider, plume_time_num,
+                 plume_vmin, plume_vmax])
 
         # 图件修改按钮
         plot_modify_btn.click(

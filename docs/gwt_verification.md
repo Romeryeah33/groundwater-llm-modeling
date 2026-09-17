@@ -190,7 +190,7 @@ t = 15000 d：污染格 2289 / 22454 = 10.19%（修复前是 100% 的全域毯�
 tests/test_gwt_pipeline.py               52/52  通过   （46 → 52，+6 为 total_time 相关）
 tests/test_source_zone.py                97/97  通过   ← 本轮新增（源区定位 + 方位/时间约定）
 tests/test_prompt_templates.py           52/52  通过   ← 本轮新增（模板能否 .format 渲染）
-tests/test_plume_visualization.py        65/65  通过
+tests/test_plume_visualization.py        76/76  通过   （65 → 76，+11 为"确定重绘"接线锁）
 tests/test_model_builder.py              全部通过
 tests/test_physics_engine.py             全部通过
 tests/test_boundary_pairs.py             56/56  通过
@@ -356,3 +356,48 @@ GHB  212.0 落在 row 0（最南）                                      ← sou
 · total_time: 模拟总时长为 150000 d（410.7 年），请确认是否符合预期。（若 15000 天其实是**总**模拟时长，请改写为 "total_time": 15000，否则会被按每期 15000 天解释）
 另有 9 条枚举/字符串类参数未做范围检查的低优先提示（不影响建模）
 ```
+
+---
+
+## 7. 单时刻污染羽的色标上下限改为「确定重绘」
+
+**现象**：想在下限框输入 `300`，敲下 `3` 的那一刻程序就开始算，用户必须等这次结果刷出来
+才能接着键入 `0` —— 只要想输入多位数就必然被卡住。
+
+**根因是事件语义，不是计算慢**：原来三个控件都挂了 `.change`：
+
+```python
+for _w in (plume_auto_range, plume_vmin, plume_vmax):
+    _w.change(_on_plume_number, [...], [...])
+```
+
+`gr.Number.change` 是**逐字符**触发的，每次键入即一次完整重绘。
+
+**改法**：新增 `✅ 确定重绘` 按钮 + `_on_plume_apply`，事件接线收敛为
+
+| 触发源 | 事件 | 说明 |
+|---|---|---|
+| `plume_time_slider` | `release` | 拖动结束才触发（原样保留） |
+| `plume_time_num` | `submit` | 回车即改（原样保留） |
+| `plume_apply_btn` | `click` | **新增**：输入完上下限再点 |
+| `plume_vmin` / `plume_vmax` | `submit` | **新增**：回车等价于点确定 |
+| `plume_auto_range` | `change` | 复选框单击一次即生效，不涉及键入 |
+
+浓度框自身不再有任何 `change` 绑定，键入过程完全不触发计算。顺带消除了一类隐患：
+程序回写输入框不再引发新事件，不存在回环。
+
+`_on_plume_apply` 的时刻取值：数字框有有效值用它，否则回退滑块 —— 刻意复用
+`_render_plume` 而不是复制一份逻辑，色标解析（`_pick_vmin_vmax`）的既有语义
+（勾自动忽略输入框、单框留空回退自动、上限小于下限自动纠正）一并继承。
+
+**回归锁**：`tests/test_plume_visualization.py` 9.1~9.11（65 → 76）。与纯函数测试不同，
+这里断言的是**组件图上的边**：
+
+- 9.7~9.9：能按标签定位两个浓度框、能扫到 change 事件、`_on_plume_apply` 恰好 4 条绑定
+- 9.10：**没有任何 change 事件挂在浓度框自身上**
+- 9.11：**判据自检** —— 把坏边原地接回去，扫描必须报警
+
+9.11 是必需的，因为本节初版的 9.10 是**空过的**：判据按 `fn.inputs` 里的 id 解析输入，
+而 Gradio 存的是**组件对象**，永远得空集 → 接回坏边照样报绿。另外判据从"输入含浓度框"
+收窄为"**触发源**是浓度框"：`plume_auto_range.change` 的输入里也含这两个框（处理器要读
+它们），那是单击复选框这一下，属合法。
