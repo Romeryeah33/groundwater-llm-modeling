@@ -47,6 +47,13 @@
           "type": "number", "default": 0.0,
           "description": "网格旋转角度（度）"
         },
+        "origin_xy": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"type": "number"},
+          "description": "网格左下角在 SHP/真实坐标系中的 [x0, y0]。上传 SHP 时由程序按边界外框自动写入，源区选格与底图对齐都以此为准；缺省表示使用局部坐标系原点 (0, 0)。"
+        },
         "crs": {
           "type": "string", "description": "坐标参考系 (EPSG code)"
         }
@@ -200,13 +207,26 @@
       "properties": {
         "nper": {"type": "integer", "minimum": 1, "description": "应力期数量"},
         "steady_state": {"type": "boolean", "description": "是否稳态"},
+        "total_time": {
+          "type": "number",
+          "minimum": 0,
+          "description": "【总】模拟时长 (d)。与 nper 配合使用：程序按 total_time / nper 等分每个应力期的长度。用户说\"模拟时长15000天，分为10个应力期\"时应填这里，而不是把 15000 填进 perlen。"
+        },
+        "perlen": {
+          "type": "number",
+          "minimum": 0,
+          "description": "【单个】应力期的长度 (d)，不是总时长。10 期 × perlen 15000 = 总时长 150000 d，极易被误读；当用户说的是总时长时请改用 total_time。"
+        },
+        "nstp": {"type": "integer", "minimum": 1, "description": "每个应力期的时间步数"},
+        "tsmult": {"type": "number", "default": 1.0, "description": "步长乘子"},
         "period_data": {
           "type": "array",
+          "description": "逐期显式给出时间离散。优先级最高，存在时 total_time / perlen 均不生效。",
           "items": {
             "type": "object",
             "properties": {
-              "perlen": {"type": "number", "description": "应力期长度 (d)"},
-              "nstp": {"type": "integer", "description": "时间步数"},
+              "perlen": {"type": "number", "description": "该期长度 (d)"},
+              "nstp": {"type": "integer", "description": "该期时间步数"},
               "tsmult": {"type": "number", "default": 1.0, "description": "步长乘子"}
             }
           }

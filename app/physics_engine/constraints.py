@@ -18,6 +18,7 @@ from typing import Optional, Tuple, List, Dict
 import numpy as np
 
 from app.knowledge.semantic_db import SemanticDB, semantic_db
+from app.utils.ir_normalize import normalize_stress_periods
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +335,15 @@ class ParameterRangeConstraint:
         "nlay": (1, 200, "dimensionless"),
         "hclose": (1e-8, 0.1, "m"),
         "max_iter": (10, 50000, "dimensionless"),
+        # ── 时间离散（stress_periods）──
+        # perlen 上界刻意取 1e5：East Texas 案例的 15000 仍然合法，不新造错误。
+        # 真正的量纲/语义问题（perlen 是"单期长度"而非"总时长"）由
+        # `validator._check_time_discretization` 负责，那里能同时看到
+        # nper / total_time / period_data 三者的关系，比单参数上下界更准。
+        "perlen": (1e-3, 1e5, "d"),
+        "nstp": (1, 1e6, "dimensionless"),
+        "nper": (1, 1000, "dimensionless"),
+        "total_time": (1e-3, 1e7, "d"),
     }
 
     def __init__(self, sem_db: Optional[SemanticDB] = None):
@@ -484,6 +494,35 @@ class ParameterRangeConstraint:
             v = _unwrap(solver.get(pname))
             if v is not None:
                 results.append(self.check_param(pname, v, aqua_type))
+
+        # 检查时间离散参数
+        #
+        # 注意：只往 PHYSICAL_RANGES 加字典条目是**空操作** —— 本函数此前从不
+        # 遍历 stress_periods，所以必须同时在这里补上遍历块，否则新加的
+        # perlen/nstp/nper/total_time 边界永远不会被触发。
+        #
+        # 顶层与 transport 两处都看：East Texas 的形态正是顶层裸整数 10、
+        # 真实时间信息在 transport.stress_periods。归一化用
+        # `app.utils.ir_normalize.normalize_stress_periods`（唯一实现，
+        # model_mapper._map_time_params 与 validator 三处共用）。
+        for _scope, _stress in (
+            ("stress_periods", normalize_stress_periods(json_ir.get("stress_periods"))),
+            ("transport.stress_periods",
+             normalize_stress_periods(
+                 (json_ir.get("transport") or {}).get("stress_periods"))),
+        ):
+            if not isinstance(_stress, dict):
+                continue
+            for pname in ("perlen", "nstp", "nper", "total_time"):
+                v = _unwrap(_stress.get(pname))
+                if v is None:
+                    continue
+                res = self.check_param(pname, v, aqua_type)
+                # 同名参数可能在两处出现，标上来源，否则用户看到"perlen 超范围"
+                # 却不知道该改哪一个
+                if not res.is_valid:
+                    res.description = f"[{_scope}] {res.description}"
+                results.append(res)
 
         return results
 

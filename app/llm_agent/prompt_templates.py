@@ -56,13 +56,18 @@ SYSTEM_PROMPT = """你是一个地下水数值模拟专家助手（Groundwater M
 {
   "ir_version": "1.0",
   "project": {"name": "...", "model_type": "groundwater_flow|solute_transport|reactive_transport"},
-  "domain": {"x_range": [xmin, xmax], "y_range": [ymin, ymax], "units": "meters"},
+  "domain": {"x_range": [xmin, xmax], "y_range": [ymin, ymax], "units": "meters",
+             "origin_xy": [x0, y0]},
   "grid": {"nrow": 50, "ncol": 50, "nlay": 1},
   "aquifer": {"type": "confined|unconfined|convertible", "parameters": {...}},
   "boundary_conditions": [...],
+  "stress_periods": {"nper": 1, "steady_state": true},
   ...
 }
 ```
+
+其中 `stress_periods.total_time` 是**总**模拟时长(d)，`perlen` 是**单个**应力期长度(d)；
+`domain.origin_xy` 是网格左下角的真实坐标，上传 SHP 时由程序写入，源区选格与底图对齐都以此为准。
 
 当前对话中，请根据用户的输入信息，逐步提取参数并引导补全。
 """
@@ -168,6 +173,10 @@ NER_EXTRACTION_PROMPT = """从以下对话中提取地下水建模相关的命�
 
 只返回 JSON 数组，不要加任何解释。"""
 
+# ⚠️ 本模板由 .format() 渲染，正文里的 JSON 示例**大括号必须写成 {{ }}**。
+# 单个 { 会被当成替换字段 —— 曾因 few-shot 里的 {"nper": 10} 直接 KeyError，
+# 崩掉整条 IR 生成链路，而测试套件因为 mock 了 LLM 完全没察觉。
+# tests/test_prompt_templates.py 会渲染每个模板兜底。
 IR_GENERATION_PROMPT = """根据对话历史和已提取的参数信息，生成/更新标准 JSON IR。
 
 ## 对话历史（理解用户完整意图的关键）
@@ -188,8 +197,33 @@ IR_GENERATION_PROMPT = """根据对话历史和已提取的参数信息，生成
 3. 确保单位已标准化（长度→m，时间→d）
 4. 对于不确定的信息，设置 value: null 并标记 source: "uncertain"
 5. 如果用户提到了污染物或溶质运移，设置 transport.enabled = true，并在 transport.species 中列出污染物名称
-6. 如果用户提到了补给浓度（如"填埋场补给浓度20000ppm"），在 boundary_conditions 中添加 rch 类型边界，包含 parameters.rate 和 parameters.concentration
-6. 边界条件需要构建完整的 boundary_conditions 数组，包括 type、name、参数和位置信息
+6. 如果用户提到了补给浓度（如"填埋场补给浓度20000ppm"），在 boundary_conditions 中添加 rch 类型边界，包含 parameters.rate 和 parameters.concentration，**并且必须给出位置**（见第 7 条）
+7. **带浓度的边界必须能定位到具体网格**。按优先级任选其一给出：
+   - `geometry.bbox = [xmin, ymin, xmax, ymax]`（与网格同一坐标系）；
+   - `geometry.coordinates`（多边形顶点序列）；
+   - 图层名匹配：`position` 或 `name` 里含上传 SHP 的图层名关键词（如上传了 `landfill_arcs.shp` 就写 `"position": "landfill"`）。
+   三者都给不出时**不要瞎猜**，程序会直接拒绝建模并提示用户补位置 —— 这比默默把点源放大成全域面源要好。
+8. 边界条件需要构建完整的 boundary_conditions 数组，包括 type、name、参数和位置信息
+9. **时间字段的语义见下方示例，`perlen` 是"单个应力期的长度"，不是总时长**。用户说"模拟时长 15000 天，分为 10 个应力期"时要写 `"total_time": 15000`，程序会自动按 nper 等分；写成平铺 `"perlen": 15000` 会让总时长变成 150000 天。
+
+## stress_periods 示例（务必按字段语义填写）
+
+稳态（默认，用于只跑流场）：
+```json
+"stress_periods": {{"nper": 1, "steady_state": true}}
+```
+
+瞬态（"模拟时长15000天，均匀分为10个应力期，每个应力期1个时间步"）：
+```json
+"stress_periods": {{"nper": 10, "steady_state": false, "total_time": 15000, "nstp": 1}}
+```
+
+需要逐期不同长度时才用 `period_data`（此时 `total_time` / `perlen` 均不生效）：
+```json
+"stress_periods": {{"nper": 2, "steady_state": false,
+                   "period_data": [{{"perlen": 100, "nstp": 10}},
+                                   {{"perlen": 900, "nstp": 30}}]}}
+```
 
 只返回合并后的完整 JSON IR，不要加任何解释。"""
 

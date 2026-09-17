@@ -475,8 +475,22 @@ class IntentParser:
             "pumping_rate": "source_sinks.well.rate",
             "recharge": "source_sinks.recharge.rate",
             # 应力期
-            "stress_periods": "stress_periods",
-            "nper": "stress_periods",
+            # ⚠️ 这些必须落到 `stress_periods.<子字段>`，**绝不能**落到
+            # `stress_periods` 本身。落到父路径会把 IR 写成裸标量
+            # `"stress_periods": 10`，而在 `_merge_ir(patched_ir, json_ir)` 里
+            # 标量不是 dict、`_is_empty(10)` 又为假，于是走"保留 base 非空值"
+            # 分支 —— **LLM 产出的正确 dict（含 total_time）会被这个标量顶掉**，
+            # 用户最终看到总时长 150000 d 而不是 15000 d。
+            "stress_periods": "stress_periods.nper",
+            "nper": "stress_periods.nper",
+            "total_time": "stress_periods.total_time",
+            "perlen": "stress_periods.perlen",
+            "nstp": "stress_periods.nstp",
+            "tsmult": "stress_periods.tsmult",
+            # NER 把"每个应力期1个时间步"抽成这个 standard_name，不映射的话会落到
+            # 默认的 `aquifer.parameters.time_steps_per_stress_period` —— 一个
+            # 语义完全错误的位置（时间步数与含水层参数无关）。
+            "time_steps_per_stress_period": "stress_periods.nstp",
         }
         return PARAM_PATH_MAP.get(param_name.lower(), f"aquifer.parameters.{param_name.lower()}")
 
@@ -594,6 +608,35 @@ class IntentParser:
                     current[final_key] = value
                 else:
                     current[final_key] = value
+
+        # ── 归位：`stress_periods` 必须是 dict，绝不能是裸标量 ──
+        # 裸标量（老会话遗留的 `"stress_periods": 10`，或 LLM 把"10个应力期"
+        # 直接写成数字）在 `_merge_ir` 里会**顶掉** LLM 产出的正确 dict，
+        # 导致 `total_time` 丢失、总时长被按 `perlen × nper` 误算。
+        # 这里统一收敛成 `{"nper": N}`，让后续深合并能正常进行。
+        _sp = ir.get("stress_periods")
+        if _sp is not None and not isinstance(_sp, dict):
+            if isinstance(_sp, bool):
+                ir.pop("stress_periods", None)
+            elif isinstance(_sp, (int, float)):
+                ir["stress_periods"] = {"nper": int(_sp)}
+                logger.info(f"规范化 stress_periods: 裸标量 {_sp} → {{'nper': {int(_sp)}}}")
+            elif isinstance(_sp, (list, tuple)):
+                ir["stress_periods"] = {"period_data": list(_sp)}
+                logger.info(f"规范化 stress_periods: 列表 → {{'period_data': [{len(_sp)} 期]}}")
+            elif isinstance(_sp, str):
+                ir.pop("stress_periods", None)
+                logger.warning(f"丢弃无法解释的 stress_periods 字符串: {_sp!r}")
+        elif isinstance(_sp, dict):
+            # dict 但只有裸的 perlen 而没有 total_time / period_data 时提醒一次：
+            # `perlen` 是**单期**长度，nper × perlen 才是总时长，最容易差 nper 倍。
+            if (_sp.get("perlen") and not _sp.get("total_time")
+                    and not _sp.get("period_data")):
+                logger.warning(
+                    f"stress_periods 只给了 perlen={_sp.get('perlen')}，按 MF6 语义它是"
+                    f"**单期**长度，总时长将为 nper×perlen={_sp.get('nper', 1)}×"
+                    f"{_sp.get('perlen')}；若该值是**总**模拟时长，请改写为 total_time"
+                )
 
         # 将收集到的边界条目合并到 boundary_conditions 列表
         if boundary_entries:
@@ -879,7 +922,7 @@ class IntentParser:
             logger.info(f"已从 IR 中移除非标准顶层键: {removed}")
         return cleaned
 
-    def _merge_ir(self, base: dict, overlay: dict) -> dict:
+    def _merge_ir(self, base: dict, overlay: dict, _depth: int = 0) -> dict:
         """
         深度合并：base（累积历史 IR）提供已有值，overlay（LLM 输出）补充新增/空字段。
 
@@ -887,21 +930,30 @@ class IntentParser:
         - base 中已有非空值 → 优先保留（前轮参数不丢失）
         - base 中为空值 → overlay 的值可以填入（LLM 可填充空字段）
         - overlay 中的新字段 → 加入结果
-        - 嵌套 dict → 递归合并
+        - 嵌套 dict → 递归合并（**不受顶层白名单约束**，见下）
+
+        `_depth`：白名单只在**顶层**（`_depth == 0`）生效。`VALID_TOP_KEYS` 装的是
+        `project` / `grid` / `stress_periods` 这类**顶层**键名，把它套到每一层递归上
+        会把所有嵌套键都判成"非标准键"丢掉 —— 实测
+        `stress_periods = {"nper":10, "steady_state":false, "total_time":15000,
+        "nstp":1}` 会被砍成 `{"nper":10}`，`total_time` 静默消失，总时长随后被按
+        `perlen × nper` 误算成 150000 d 而不是 15000 d。白名单的注释本来就写着
+        "顶层"，所以限制在顶层才是原意。
         """
         if not isinstance(overlay, dict):
             return copy.deepcopy(base) if base else {}
         result = copy.deepcopy(base) if base else {}
         for key, val in overlay.items():
-            # 跳过 LLM 编造的非标准顶层键
+            # 跳过 LLM 编造的非标准**顶层**键
             key_base = re.sub(r'\[\d+\]', '', key)
-            if key_base not in self.VALID_TOP_KEYS and not key.startswith("_"):
-                logger.debug(f"_merge_ir 跳过非标准键: {key}")
+            if (_depth == 0 and key_base not in self.VALID_TOP_KEYS
+                    and not key.startswith("_")):
+                logger.debug(f"_merge_ir 跳过非标准顶层键: {key}")
                 continue
             if key not in result:
                 result[key] = copy.deepcopy(val) if isinstance(val, (dict, list)) else val
             elif isinstance(result[key], dict) and isinstance(val, dict):
-                result[key] = self._merge_ir(result[key], val)
+                result[key] = self._merge_ir(result[key], val, _depth + 1)
             elif self._is_empty(result[key]) and not self._is_empty(val):
                 # base 值为空，overlay 有值 → 接受 overlay
                 result[key] = copy.deepcopy(val) if isinstance(val, (dict, list)) else val

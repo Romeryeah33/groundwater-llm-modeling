@@ -276,19 +276,43 @@ class ReportGenerator:
                 doc.add_picture(path, width=Inches(5.5))
                 doc.add_paragraph("")
 
+    # ProcessIdentifier 与 Visualizer 返回的英文枚举 → 中文。报告是交付物，
+    # 不该出现裸露的 "advection+mixed+sorption_retarded" 这类内部标签。
+    _PROCESS_ZH = {
+        "advection": "对流", "dispersion": "弥散", "decay": "降解",
+        "sorption": "吸附", "mixed": "混合",
+        "advection_dominated": "对流主导", "dispersion_dominated": "弥散主导",
+        "mixed_transport": "对流-弥散混合",
+        "reaction_limited": "反应受限", "transport_limited": "运移受限",
+        "mixed_kinetics": "反应-运移混合",
+        "sorption_retarded": "吸附迟滞",
+        "insufficient_data": "数据不足",
+    }
+
+    @classmethod
+    def _zh(cls, key) -> str:
+        if not isinstance(key, str):
+            return str(key) if key is not None else "N/A"
+        return "+".join(cls._PROCESS_ZH.get(part, part) for part in key.split("+"))
+
     def _add_process_analysis(self, doc, analysis: dict):
         """机理分析"""
-        doc.add_paragraph(f"主控过程: {analysis.get('dominant_process', 'N/A')}")
+        doc.add_paragraph(f"主控过程: {self._zh(analysis.get('dominant_process', 'N/A'))}")
         doc.add_paragraph(analysis.get("explanation", ""))
 
         contributions = analysis.get("contributions", {})
         if contributions:
             doc.add_paragraph("各过程贡献率:")
             for process, pct in contributions.items():
-                doc.add_paragraph(f"  {process}: {pct}%")
+                doc.add_paragraph(f"  {self._zh(process)}: {pct}%")
 
+        doc.add_paragraph(f"运移机制: {self._zh(analysis.get('transport_regime', 'N/A'))}")
+        doc.add_paragraph(f"反应机制: {self._zh(analysis.get('reaction_regime', 'N/A'))}")
         doc.add_paragraph(f"Peclet数: {analysis.get('peclet_number', 'N/A')}")
+        doc.add_paragraph(f"Damkohler数: {analysis.get('damkohler_number', 'N/A')}")
         doc.add_paragraph(f"迟滞因子: {analysis.get('retardation_factor', 'N/A')}")
+        doc.add_paragraph("注: 通量统计基于第 0 层浓度场与第 0 层比流量场，"
+                          "为单层结果，非全层积分。")
 
     def _add_conclusions(self, doc, json_ir: dict, sim_results: dict):
         """结论与建议"""

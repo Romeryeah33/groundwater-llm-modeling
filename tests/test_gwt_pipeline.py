@@ -153,6 +153,45 @@ check("显式 period_data 生效",
       len(_t["period_data"]) == 2
       and abs(sum(p["perlen"] for p in _t["period_data"]) - 300.0) < 1e-9)
 
+# total_time —— 想表达"总共 15000 d"的**推荐**写法。
+#
+# 上面那条断言把兼容性钉死了：没有 total_time 时 perlen 仍是单期长度
+# （10 × 15000 = 150000）。要表达总时长，正确的一等公民字段是 total_time，
+# 程序会按 nper 等分，不依赖 LLM 猜。East Texas 提示词第 9 行"模拟时长15000天，
+# 均匀分为10个应力期"说的就是它。
+_t = _mapper._map_time_params({"stress_periods": {
+    "nper": 10, "steady_state": False, "total_time": 15000, "nstp": 1,
+}})
+_tot = sum(p["perlen"] for p in _t["period_data"])
+check("total_time 按 nper 等分",
+      len(_t["period_data"]) == 10 and abs(_t["perlen"] - 1500.0) < 1e-9,
+      f"nper={len(_t['period_data'])}, perlen={_t['perlen']}")
+check("total_time=15000 → 总时长 15000 d（不是 150000）",
+      abs(_tot - 15000.0) < 1e-6, f"总时长={_tot}")
+
+# total_time 覆盖**陈旧的**平铺 perlen：这正是 East Texas 的真实 IR 形态
+# （顶层裸整数 10，transport.stress_periods 里同时有 total_time 与 perlen）
+_t = _mapper._map_time_params({
+    "stress_periods": {"nper": 10, "steady_state": False,
+                       "total_time": 15000, "perlen": 15000, "nstp": 1},
+})
+_tot = sum(p["perlen"] for p in _t["period_data"])
+check("total_time 覆盖平铺 perlen", abs(_t["perlen"] - 1500.0) < 1e-9,
+      f"perlen={_t['perlen']}")
+check("覆盖后总时长 15000 d", abs(_tot - 15000.0) < 1e-6, f"总时长={_tot}")
+
+# 校验层要在**没修**的 IR 上就报出 150000 d，而不是等用户看图才发现
+from app.physics_engine.validator import ClosedLoopValidator as _CLV
+_iss = _CLV()._check_time_discretization({
+    "stress_periods": 10,
+    "transport": {"stress_periods": {"nper": 10, "perlen": 15000}},
+})
+check("校验层抓到 East Texas 的总时长 150000 d",
+      any("150000" in i.description for i in _iss),
+      str([(i.severity.name, i.description[:60]) for i in _iss]))
+check("该提示不阻断建模（无 ERROR）",
+      all(i.severity.name != "ERROR" for i in _iss))
+
 
 # ============================================================
 # Gate 0-3: ADV 方案白名单（UTVD 会让 mf6 6.3.0 硬终止）

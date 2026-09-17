@@ -122,6 +122,62 @@ class ResultProcessor:
         return df
 
     # ================================================================
+    # 流速场提取（供主控过程辨识使用）
+    # ================================================================
+
+    def extract_velocity_field(self, gwf, layer: int = 0) -> Optional[np.ndarray]:
+        """由水头场按达西定律反算指定层的比流量场
+
+        Returns:
+            (3, nrow, ncol) 数组：第 0/1/2 个分量分别为 qx/qy/qz，单位 m/d；
+            无法算出时返回 None。
+
+        **形状是硬约束**：``ProcessIdentifier.identify_dominant_process`` 内部做
+        ``np.linalg.norm(vel, axis=0)`` 再与二维浓度场相乘，所以 ``vel`` 的
+        ``ndim`` 必须为 3 —— 即"3 个分量 × 单层网格"。若按 (3, nlay, nrow, ncol)
+        堆叠会得到三维的 ``v_mag``，与二维浓度广播失败。故这里只取单层，
+        与 ``extract_concentration_field(layer=...)`` 保持同一层、口径一致。
+
+        **为什么不用 flopy 的 get_specific_discharge**：该函数对 MODFLOW 6 要求
+        水流模型在 NPF 包里开启 ``save_specific_discharge``，本项目的 NPF 没开，
+        预算文件里没有 DATA-SPDIS 记录，调用会失败。由水头场反算不依赖预算文件，
+        对**已有的**运行结果也直接可用。水流模型是稳态时水头场不随时间变，
+        故单次计算即可代表所有输出时刻。
+
+        不做"比流量 ÷ 孔隙度"的换算：adv/disp/decay 三项通量都是 |v| 的一次
+        齐次函数，Pe、Da 与各过程百分比在换算前后完全不变。
+        """
+        try:
+            head = np.asarray(gwf.output.head().get_data(), dtype=float)
+            h = head[layer] if head.ndim == 3 else head
+
+            mg = gwf.modelgrid
+            delr = np.atleast_1d(np.asarray(mg.delr, dtype=float)).ravel()
+            delc = np.atleast_1d(np.asarray(mg.delc, dtype=float)).ravel()
+
+            # 渗透系数：取同层。非均匀 K 也支持（逐格相乘）
+            try:
+                k = np.asarray(gwf.npf.k.get_data(), dtype=float)
+                k = k[layer] if k.ndim == 3 else k
+            except Exception as e:
+                logger.warning(f"无法读取渗透系数 K（{e}），按 K=1 计算："
+                               f"只影响流速量级，不影响 Pe/各过程占比")
+                k = 1.0
+
+            dy = float(delc[0]) if len(delc) == h.shape[0] else float(np.mean(delc))
+            dx = float(delr[0]) if len(delr) == h.shape[1] else float(np.mean(delr))
+
+            # np.gradient(f, spacing) 的 spacing 是"间距"而非坐标，只支持标量；
+            # 本项目的网格恒为均匀（np.full），故取首元素即可代表整体
+            dhdy, dhdx = np.gradient(h, dy, dx)
+            qx = -k * dhdx
+            qy = -k * dhdy
+            return np.stack([qx, qy, np.zeros_like(qx)], axis=0)
+        except Exception as e:
+            logger.warning(f"流速场提取失败: {e}")
+            return None
+
+    # ================================================================
     # 水量/质量平衡提取
     # ================================================================
 

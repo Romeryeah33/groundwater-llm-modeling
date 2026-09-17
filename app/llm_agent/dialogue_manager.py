@@ -512,13 +512,16 @@ class DialogueManager:
                 "confidence": "low", "reason": "默认底板高程 50m（50m厚含水层）",
             },
             "stress_periods": {
+                # 只写 total_time，**不再同时写平铺 perlen**：
+                # `perlen` 按 MF6 语义是单期长度，与 total_time 并列出现时
+                # 二者语义冲突，是"总时长差 10 倍"那类 bug 的温床。
+                # 稳态 1 期、总时长 1 天，语义自洽且无歧义。
                 "value": {
-                    "nper": 1, "perlen": 1.0, "steady_state": True,
-                    "period_data": [{"perlen": 1.0, "nstp": 1, "tsmult": 1.0}],
+                    "nper": 1, "steady_state": True, "total_time": 1.0,
                 },
                 "unit": "",
                 "confidence": "low",
-                "reason": "默认稳态单应力期",
+                "reason": "默认稳态单应力期（总时长 1 天）",
             },
             "aquifer.parameters.ss": {
                 "value": 1e-5, "unit": "1/m",

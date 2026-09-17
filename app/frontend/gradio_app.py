@@ -32,8 +32,15 @@ from app.knowledge.param_guide import render_missing_params_guidance
 from app.llm_agent.file_handler import file_handler
 from app.physics_engine.validator import quick_validate
 from app.modeling.model_builder import AutoModelBuilder
+from app.modeling.source_zone import (
+    SourceZoneUnresolved,
+    grid_dims,
+    materialize_source_zones,
+)
 from app.analysis.visualizer import VisualizationEngine, visualizer
 from app.analysis.result_processor import ResultProcessor
+from app.utils.ir_normalize import merge_time_sources
+from app.analysis.process_identifier import process_identifier
 from app.analysis.report_generator import ReportGenerator
 from app.visualization.plot_styler import plot_styler
 
@@ -61,6 +68,336 @@ def get_session(sid: str) -> DialogueManager:
             # 标记为刚恢复，供 chat_handler 显示欢迎信息
             dm._just_restored = True
     return sessions[sid]
+
+
+# ============================================================
+# 结果缓存 —— 支撑污染羽"手动选时刻 / 选色标范围"的交互重绘
+# ============================================================
+# 为什么用模块级 dict 而不是 gr.State：缓存里必须留住 gwt（MF6 模型对象）
+# 才能按需读取 .ucn，而它不可序列化。本仓库已有两个同类先例：
+# sessions（sid → DialogueManager）与 plot_styler 单例。
+_result_cache: dict = {}   # sid -> {gwt, gwf, times, delr, delc, layer, c_range,
+                          #         basemap, workspace, velocity, _frame_cache}
+
+
+def _detect_basemap_inputs(sid: str) -> dict:
+    """
+    从会话上传文件中推断底图与边界文件。
+
+    原先这段逻辑内联在 run_model_handler 里、只服务于水头图。抽出来供污染羽图
+    复用，两张图因此必定拿到同一套参数（各扫一次可能选中不同文件）。
+
+    Returns:
+        {"basemap_path": str|None, "shp_path": str|None,
+         "clip_shp_path": str|None, "shp_bounds": list|None,
+         "origin_xy": list|None}
+    """
+    found = {"basemap_path": None, "shp_path": None,
+             "clip_shp_path": None, "shp_bounds": None,
+             "origin_xy": None}
+    try:
+        dm = get_session(sid)
+        file_data = dm.state.get("file_uploads", {})
+        if not file_data:
+            return found
+
+        uploaded_paths = dm.state.get("_uploaded_file_paths", [])
+        basemap_path = None
+        shp_bounds = None
+        shp_path = None
+
+        # 1. 查找底图图片（优先 .tif GeoTIFF，其次 .png/.jpg）
+        for up in uploaded_paths:
+            fname = Path(up).name.lower()
+            ext = Path(up).suffix.lower()
+            # 底图关键词匹配
+            is_basemap_name = any(kw in fname for kw in
+                ['底图', 'basemap', 'base', 'map', '影像', 'image', 'satellite', '卫片'])
+            if ext in ('.tif', '.tiff'):
+                basemap_path = up
+                if is_basemap_name:
+                    break  # 优先使用明确命名的底图
+            elif ext in ('.png', '.jpg', '.jpeg', '.bmp'):
+                if is_basemap_name:
+                    basemap_path = up
+                    break
+                elif basemap_path is None:
+                    basemap_path = up  # 回退到任意图片
+
+        # 2. 查找 SHP 边界 — 按名称匹配 "boundary"/"边界"，优先级：面 > 线
+        shp_data = file_data.get("shapefiles", {})
+        boundary_sph_name = dm.state.get("_boundary_shp_name", "")
+
+        # 先收集所有候选边界文件
+        boundary_candidates = []
+        for name, info in shp_data.items():
+            name_lower = name.lower()
+            is_boundary = ('boundary' in name_lower or '边界' in name or
+                           'border' in name_lower or name == boundary_sph_name)
+            if is_boundary and info.get("bounds") and len(info["bounds"]) >= 4:
+                b = info["bounds"]
+                if all(isinstance(x, (int, float)) and not (x != x) for x in b[:4]):
+                    is_polygon = 'polygon' in info.get('geometry_type', '').lower()
+                    boundary_candidates.append((name, info, is_polygon))
+
+        # 也加入 _polys 面要素作为裁剪用
+        for name, info in shp_data.items():
+            if 'poly' in name.lower() and info.get('geometry_type', '').lower() == 'polygon':
+                if info.get("bounds"):
+                    b = info["bounds"]
+                    if all(isinstance(x, (int, float)) and not (x != x) for x in b[:4]):
+                        if not any(c[0] == name for c in boundary_candidates):
+                            boundary_candidates.append((name, info, True))
+
+        # 选择边界：优先面要素，其次线要素
+        polygon_candidates = [c for c in boundary_candidates if c[2]]
+        line_candidates = [c for c in boundary_candidates if not c[2]]
+
+        # 用于裁剪的面要素
+        clip_shp_path = None
+        if polygon_candidates:
+            name, info, _ = polygon_candidates[0]
+            b = info["bounds"]
+            shp_bounds = b if shp_bounds is None else shp_bounds
+            for up in uploaded_paths:
+                if Path(up).stem == name and Path(up).suffix.lower() == '.shp':
+                    clip_shp_path = up
+                    break
+            logger.info(f"边界裁剪面: {name} ({info['geometry_type']})")
+
+        # 用于显示的线要素（Boundary_arcs）
+        if line_candidates:
+            name, info, _ = line_candidates[0]
+            b = info["bounds"]
+            shp_bounds = b if shp_bounds is None else shp_bounds
+            if shp_path is None:
+                for up in uploaded_paths:
+                    if Path(up).stem == name and Path(up).suffix.lower() == '.shp':
+                        shp_path = up
+                        break
+            logger.info(f"边界显示线: {name} ({info['geometry_type']})")
+
+        # 如果没有面要素用于裁剪，尝试找任何 _polys 文件
+        if clip_shp_path is None:
+            for name, info in shp_data.items():
+                if 'poly' in name.lower() and 'polygon' in info.get('geometry_type', '').lower():
+                    for up in uploaded_paths:
+                        if Path(up).stem == name and Path(up).suffix.lower() == '.shp':
+                            clip_shp_path = up
+                            break
+                    if clip_shp_path:
+                        logger.info(f"使用面要素裁剪: {name}")
+                        break
+
+        # ── 网格原点 ──
+        # 优先读 IR 里已经物化的 `domain.origin_xy`（file_parse_handler 上传时写入），
+        # 缺则回退到 SHP 外框左下角。两条路都走通后，把 `shp_bounds` 的前两位
+        # **覆盖成同一个原点**，让"建模用的原点"与"可视化用的原点"是同一个值
+        # 而不是两个恰好相等的数 —— 否则源区选格与绘图会悄悄错开。
+        origin_xy = None
+        ir = (get_session(sid).state or {}).get("json_ir", {}) or {}
+        _ir_origin = (ir.get("domain") or {}).get("origin_xy")
+        if isinstance(_ir_origin, dict):
+            _ir_origin = _ir_origin.get("value")
+        if _ir_origin and len(_ir_origin) >= 2:
+            origin_xy = [float(_ir_origin[0]), float(_ir_origin[1])]
+        elif shp_bounds and len(shp_bounds) >= 4:
+            origin_xy = [float(shp_bounds[0]), float(shp_bounds[1])]
+
+        if origin_xy and shp_bounds and len(shp_bounds) >= 4:
+            if (abs(float(shp_bounds[0]) - origin_xy[0]) > 1e-6 or
+                    abs(float(shp_bounds[1]) - origin_xy[1]) > 1e-6):
+                logger.warning(
+                    f"IR 的 origin_xy={origin_xy} 与 SHP 外框左下角"
+                    f"[{shp_bounds[0]:.1f}, {shp_bounds[1]:.1f}] 不一致，"
+                    f"统一采用 IR 中的 origin_xy"
+                )
+            shp_bounds = [origin_xy[0], origin_xy[1], shp_bounds[2], shp_bounds[3]]
+
+        logger.info(f"底图叠加: 显示线={shp_path}, 裁剪面={clip_shp_path}, "
+                    f"底图={basemap_path}, origin_xy={origin_xy}")
+        found.update(basemap_path=basemap_path, shp_path=shp_path,
+                     clip_shp_path=clip_shp_path, shp_bounds=shp_bounds,
+                     origin_xy=origin_xy)
+    except Exception as e:
+        logger.warning(f"底图输入探测失败: {e}")
+    return found
+
+
+def _sample_conc_at(cache: dict, t: float):
+    """
+    取指定时刻的浓度场，必要时在**已有输出时刻之间**做线性插值。
+
+    约束：flopy 只接受精确的输出时刻作为 ``totim``，传任意时刻会失败。所以想看
+    "360 天"这类非输出时刻，必须自己取相邻两个输出时刻做插值，且端点值一律
+    原样来自 ``get_times()``。
+
+    不做外推：t 早于首帧或晚于末帧时一律钳到端点并明确告知。
+
+    Returns:
+        (conc2d, t_lo, t_hi, interpolated, note)
+    """
+    gwt = cache.get("gwt")
+    times = cache.get("times")
+    if gwt is None or times is None or len(times) == 0:
+        return None, None, None, False, "尚无结果，请先运行建模"
+
+    rp = ResultProcessor()
+    layer = cache.get("layer", 0)
+    fcache = cache.setdefault("_frame_cache", {})
+
+    def _frame(ti):
+        key = float(ti)
+        if key not in fcache:
+            fcache[key] = rp.extract_concentration_field(gwt, layer=layer, totim=key)
+        return fcache[key]
+
+    t = float(t)
+    t_min, t_max = float(times[0]), float(times[-1])
+
+    if t <= t_min:
+        note = (f"t = {t:g} d 早于首个输出时刻 {t_min:g} d，显示首帧"
+                if t < t_min else f"t = {t:g} d（输出时刻）")
+        return _frame(t_min), t_min, t_min, False, note
+    if t >= t_max:
+        note = (f"t = {t:g} d 超出模拟时长，显示末时刻 {t_max:g} d"
+                if t > t_max else f"t = {t:g} d（输出时刻）")
+        return _frame(t_max), t_max, t_max, False, note
+
+    i = int(np.searchsorted(times, t))
+    if float(times[i]) == t:
+        return _frame(t), t, t, False, f"t = {t:g} d（输出时刻）"
+
+    t0, t1 = float(times[i - 1]), float(times[i])
+    C0, C1 = _frame(t0), _frame(t1)
+    w = (t - t0) / (t1 - t0)
+    note = f"t = {t:g} d（由 {t0:g} d 与 {t1:g} d 线性插值，权重 {w:.2f}）"
+    return C0 + (C1 - C0) * w, t0, t1, True, note
+
+
+def _extract_process_params(json_ir: dict) -> dict:
+    """
+    从 IR 的 transport 段取出 ProcessIdentifier 需要的参数。
+
+    缺项一律不填：ProcessIdentifier 自带默认值（al=10.0 / decay_rate=0.0 /
+    kd=0.0 / porosity=0.25），取不到参数不该让整个流程报错。
+    """
+    transport = json_ir.get("transport", {}) or {}
+    params = {}
+    for key in ("al", "decay_rate", "kd", "porosity"):
+        val = transport.get(key)
+        if isinstance(val, dict):
+            val = val.get("value")
+        if isinstance(val, (int, float)):
+            params[key] = float(val)
+    return params
+
+
+def _pick_vmin_vmax(auto_range: bool, vmin_in, vmax_in, span: tuple):
+    """
+    解析用于单时刻图的色标范围。
+
+    勾选"自动"时忽略输入框；未勾选时以输入框为准，单个框留空则该项回退自动。
+    返回的是**实际生效**的数值，供调用方回写进输入框，让用户看得见当前范围。
+    """
+    auto_lo, auto_hi = span
+    if auto_range:
+        return auto_lo, max(auto_hi, auto_lo + 1e-12)
+
+    lo = float(vmin_in) if isinstance(vmin_in, (int, float)) else auto_lo
+    hi = float(vmax_in) if isinstance(vmax_in, (int, float)) else auto_hi
+    if hi <= lo:
+        hi = lo + 1e-12
+    return lo, hi
+
+
+def _render_plume(t, auto_range, vmin_in, vmax_in, sid: str):
+    """
+    污染羽单时刻图的渲染内核（供滑块/数字框/色标控件共用）。
+
+    Returns:
+        (fig, status_md, vmin_out, vmax_out)
+    """
+    cache = _result_cache.get(sid)
+    if not cache or cache.get("times") is None or len(cache["times"]) == 0:
+        return None, "⚠️ 还没有可重绘的结果，请先点击「开始建模」。", vmin_in, vmax_in
+
+    if t is None:
+        t = float(cache["times"][-1])
+
+    conc, t_lo, t_hi, interp, note = _sample_conc_at(cache, t)
+    if conc is None:
+        return None, f"⚠️ {note}", vmin_in, vmax_in
+
+    span = cache.get("c_range", (0.0, float(np.max(conc))))
+    vmin, vmax = _pick_vmin_vmax(auto_range, vmin_in, vmax_in, span)
+
+    bm = cache.get("basemap", {}) or {}
+    try:
+        fig = visualizer.plot_plume_at_time(
+            conc, float(t), cache["delr"], cache["delc"],
+            threshold=0.01, vmin=vmin, vmax=vmax,
+            basemap_path=bm.get("basemap_path"),
+            shp_path=bm.get("shp_path"),
+            clip_shp_path=bm.get("clip_shp_path"),
+            shp_bounds=bm.get("shp_bounds"),
+            velocity=cache.get("velocity"),
+            title=f"污染羽 t = {float(t):g} d",
+            subtitle=note,
+        )
+    except Exception as e:
+        logger.warning(f"单时刻污染羽绘制失败: {e}")
+        logger.warning(traceback.format_exc())
+        return None, f"❌ 绘图失败: {e}", vmin_in, vmax_in
+
+    flags = []
+    if interp:
+        flags.append("（插值帧）")
+    if float(t) < float(cache["times"][0]) or float(t) > float(cache["times"][-1]):
+        flags.append("（已钳到输出范围端点）")
+    status = (f"✅ {note}　色标 {vmin:.4g} ~ {vmax:.4g} mg/L　"
+              f"本帧最大浓度 {float(np.max(conc)):.4g} mg/L {' '.join(flags)}")
+    return fig, status, vmin, vmax
+
+
+def _on_plume_slider(slider_t, auto_range, vmin_in, vmax_in, sid):
+    fig, status, vmin_o, vmax_o = _render_plume(slider_t, auto_range,
+                                                vmin_in, vmax_in, sid)
+    # 回写数字框，两个时间控件始终同步
+    return fig, status, gr.update(value=slider_t), vmin_o, vmax_o
+
+
+def _on_plume_number(num_t, auto_range, vmin_in, vmax_in, sid):
+    fig, status, vmin_o, vmax_o = _render_plume(num_t, auto_range,
+                                                vmin_in, vmax_in, sid)
+    # 回写滑块，两个时间控件始终同步
+    return fig, status, gr.update(value=num_t), vmin_o, vmax_o
+
+
+def _sync_plume_controls(sid: str):
+    """
+    运行结束后同步交互控件：滑块范围来自本次运行的输出时刻，
+    并渲染末时刻作为默认视图。由 run_btn 的 .then() 调用。
+    """
+    cache = _result_cache.get(sid)
+    if not cache or cache.get("times") is None or len(cache["times"]) == 0:
+        return (gr.update(), gr.update(), gr.update(), gr.update(),
+                None, "⚠️ 本次运行没有可交互的溶质运移结果。")
+
+    times = cache["times"]
+    t_min, t_max = float(times[0]), float(times[-1])
+    # 滑块步长取最小输出间隔：拖动时自然落在真实输出时刻上；
+    # 想看非输出时刻（如 45000 之外的值）用数字框输入，那里走插值。
+    diffs = np.diff(times)
+    step = float(diffs.min()) if len(diffs) else 1.0
+    step = max(step, 1.0)
+
+    fig, status, vmin_o, vmax_o = _render_plume(t_max, True, None, None, sid)
+    return (gr.update(minimum=t_min, maximum=t_max, value=t_max, step=step),
+            gr.update(value=t_max),
+            gr.update(value=vmin_o), gr.update(value=vmax_o),
+            fig, status)
+
 
 # ============================================================
 # 参数列表定义（在"建模对话"和"参数审查"之间显示的可编辑表格）
@@ -314,6 +651,9 @@ def chat_handler(message: str, history: list, sid: str):
         return _apply_suggestions_cmd(history, dm, sid)
     elif msg_lower in ("清空", "重置", "reset"):
         dm.reset(sid, delete_file=True)
+        # 结果缓存必须一起清：缓存里留着上一轮的 gwt（MF6 模型对象）与时刻表，
+        # 不清的话"对话已重置"之后污染羽 Tab 仍会画出上一轮的结果，前后矛盾。
+        _result_cache.pop(sid, None)
         history.append({"role": "assistant", "content": "对话已重置。请描述您的建模需求。"})
         return history, {}, [], "intake", sid
 
@@ -406,8 +746,19 @@ def _run_model_cmd(history, dm, sid):
         history.append({"role": "assistant", "content": reply})
         return history, json_ir, [], dm.state["phase"], sid
 
+    # 警告虽不阻断，但要在**这条回复里**说出来 —— 只写 logger/monitor 等于没说：
+    # "模拟总时长为 150000 d（410.7 年）"这类提示，用户看不到就永远不知道
+    # 该去改 total_time，只会觉得"程序怎么还是按 150000 天跑"。
+    warn_lines = [
+        f"  ⚠️ {i.get('param_name', '?')}: {i.get('description', '')}"
+        for i in (val_result.get("issues") or [])
+        if i.get("severity") == "warning"
+    ]
+    reply = "✅ 参数校验通过！正在启动自动建模...\n请查看下方 **📊 建模结果** 面板。"
+    if warn_lines:
+        reply += f"\n\n⚠️ 另有 {len(warn_lines)} 条警告（不阻断建模）:\n" + "\n".join(warn_lines)
     history.append({"role": "user", "content": "开始建模"})
-    history.append({"role": "assistant", "content": "✅ 参数校验通过！正在启动自动建模...\n请查看下方 **📊 建模结果** 面板。"})
+    history.append({"role": "assistant", "content": reply})
     dm.state["phase"] = "execution"
     return history, json_ir, [], dm.state["phase"], sid
 
@@ -471,6 +822,16 @@ def file_parse_handler(files, history, sid):
             ir["domain"] = {}
         ir["domain"]["x_range"] = [bounds[0], bounds[2]]
         ir["domain"]["y_range"] = [bounds[1], bounds[3]]
+        # 网格原点 = SHP 外框左下角。放在同一个 bounds、同一个分支里算，
+        # 原点与域范围因此不可能分叉。
+        #
+        # 为什么写进 IR 而不是让建模侧再探测一次：`_detect_basemap_inputs`
+        # 在 run_model_handler 里被调用，**晚于** build_and_run；而源区选格
+        # （app/modeling/source_zone.py）必须与可视化用同一个原点，否则
+        # "模型补给的格子"和"图上画在填埋场轮廓内的格子"会错开。写进 IR 后
+        # 建模侧只读 IR，不必给 build_and_run 加参数（那会被 debug_monitor
+        # 里 monkeypatch 的 wrapper 吞掉）。
+        ir["domain"]["origin_xy"] = [bounds[0], bounds[1]]
         # 标记边界 SHP 路径，供可视化裁剪使用
         dm.state["_boundary_shp_name"] = name
         reply += f"\n🌐 已从 **{name}** 提取模型范围: X=[{bounds[0]:.0f}, {bounds[2]:.0f}], Y=[{bounds[1]:.0f}, {bounds[3]:.0f}]"
@@ -500,6 +861,91 @@ def file_parse_handler(files, history, sid):
 # ============================================================
 # 建模执行
 # ============================================================
+
+def _planned_duration_text(json_ir: dict) -> str:
+    """
+    IR 里**配置**的总时长（不是 .ucn 里跑出来的那个），用于和实际结果对账。
+
+    为什么需要它：修复前用户看到的时间轴末刻是 150000 d，而提示词要的是 15000 d，
+    界面上**没有任何地方**能把"我配的时间"和"跑出来的时间"摆在一起看，
+    于是只能看到"数不对"却看不到"哪一段配错了"。
+    """
+    stress = merge_time_sources(json_ir or {})
+    try:
+        nper = int(stress.get("nper") or 1)
+    except (TypeError, ValueError):
+        nper = 1
+
+    period_data = stress.get("period_data") or []
+    if period_data:
+        try:
+            total = sum(
+                float(p.get("perlen", 1.0) or 1.0)
+                for p in period_data if isinstance(p, dict)
+            )
+            return f"{total:g} d（period_data {len(period_data)} 期）"
+        except (TypeError, ValueError):
+            return f"{len(period_data)} 期（period_data 的 perlen 无法解析）"
+
+    total_time = stress.get("total_time")
+    if total_time:
+        try:
+            return f"{float(total_time):g} d（total_time，{nper} 期等分）"
+        except (TypeError, ValueError):
+            pass
+
+    perlen = stress.get("perlen")
+    if perlen:
+        try:
+            perlen = float(perlen)
+            return f"{perlen * nper:g} d（{nper} 期 × 每期 {perlen:g} d）"
+        except (TypeError, ValueError):
+            pass
+
+    return "未给出（按默认 1 期 1 天）"
+
+
+def _warning_card_html(val_result: dict) -> str:
+    """
+    把校验**警告**渲染成界面上可见的琥珀色卡片。
+
+    此前这里只渲染 `error_count > 0` 的错误，警告只落进 `monitor.info` 的计数，
+    从不进界面 —— 于是"模拟总时长为 150000 d（410.7 年），请确认是否符合预期。
+    （若 15000 天其实是**总**模拟时长，请改写成 total_time）"这条**算得出、
+    也生成了**的提示永远没人看得见。用户只看到结果不对，看不到原因。
+    这与 `logger.info` 孤点提示是同一类失效：说了，但没人听得见。
+    """
+    warns = [i for i in (val_result.get("issues") or [])
+             if i.get("severity") == "warning"]
+    if not warns:
+        return ""
+
+    # 分信噪比展示：East Texas 的 IR 一次能出 12 条警告，其中 8 条是
+    # "参数'PCG'为非数值字符串，跳过范围检查（可能是布尔/枚举值）" —— 每个枚举型
+    # 参数都来一条。全长铺开会把唯一要紧的那条（总时长 150000 d）淹掉，
+    # 那和看不见没区别。所以低优先的折叠成一行计数，重点的逐条展开。
+    low_priority, important = [], []
+    for i in warns:
+        (low_priority if "跳过范围检查" in (i.get("description") or "")
+         else important).append(i)
+
+    rows = "<br>".join(
+        f"· <b>{i.get('param_name', '?')}</b>: {i.get('description', '')}"
+        for i in important
+    )
+    if low_priority:
+        more = f"<br><span style='color:#8d6e00'>另有 {len(low_priority)} 条枚举/字符串类" \
+               f"参数未做范围检查的低优先提示（不影响建模）</span>"
+    else:
+        more = ""
+    return (
+        "<div style='margin-top:6px;padding:6px;background:#fff8e1;"
+        "border-left:3px solid #ffb300'>"
+        f"<b style='color:#8d6e00'>参数校验警告 {len(warns)} 条</b>"
+        f"{'（' + str(len(important)) + ' 条需留意）' if low_priority else ''}"
+        f"<br>{rows}{more}</div>"
+    )
+
 
 def run_model_handler(json_ir: dict, sid: str = "default"):
     """运行自动建模"""
@@ -552,6 +998,76 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
         monitor.warn(f"校验发现 {val_result['error_count']} 个错误")
         return empty_fig, f"<p style='color:red'>参数校验发现 {val_result['error_count']} 个错误:</p><pre>{issues}</pre>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 
+    # 警告不阻断建模，但**必须可见**（此前只渲染错误，警告数只进 monitor 计数）
+    warn_html = _warning_card_html(val_result)
+    if warn_html:
+        monitor.warn(
+            f"校验警告 {val_result.get('warning_count', 0)} 条（已显示在结果面板）"
+        )
+
+    # ================================================================
+    # 源区定位闸（置于建模前，避免把点源静默放大成全域面源）
+    # ================================================================
+    # East Texas 案例的污染羽之所以看起来像水流模型结果，根因就在这里：
+    # 填埋场只占 132 格（0.59%），但带浓度的 RCH 边界找不到注入位置时，
+    # 旧代码会**静默**展开成 layer0 全网格（22454 格），源被放大 170 倍。
+    # 现在解析不出位置就**硬拒绝**，把原因与三条出路直接摆给用户。
+    source_zone_rows = []
+    try:
+        dm = get_session(sid)
+        sz_ir, sz_resolved, sz_issues = materialize_source_zones(
+            json_ir,
+            uploaded_paths=dm.state.get("_uploaded_file_paths", []),
+            file_index=(dm.state.get("file_uploads") or {}).get("shapefiles", {}),
+        )
+    except SourceZoneUnresolved as e:
+        sz_issues = [("?", str(e))]
+        sz_resolved = {}
+    except Exception as e:
+        monitor.capture_error(e, "源区定位")
+        sz_issues = [("?", f"源区定位时发生意外错误：{e}")]
+        sz_resolved = {}
+
+    if sz_issues:
+        monitor.warn(f"源区定位失败: {[n for n, _ in sz_issues]}")
+        detail = "\n\n".join(f"【{n}】\n{msg}" for n, msg in sz_issues)
+        return (
+            empty_fig,
+            "<p style='color:red'><b>源区定位失败，已阻止建模</b>"
+            "（避免把点源静默放大成全域面源，那正是污染羽看起来像水流模型结果的原因）:</p>"
+            f"<pre style='white-space:pre-wrap'>{detail}</pre>",
+            empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40),
+        )
+
+    if sz_resolved:
+        # 结果已物化进 IR（geometry.grid_indices），写回会话，重跑不必依赖上传文件
+        dm.state["json_ir"] = json_ir
+        dm.save_session(sid)
+        _grid = json_ir.get("grid", {}) or {}
+        _total = max(int(_grid.get("nrow", 1) or 1) * int(_grid.get("ncol", 1) or 1), 1)
+        _nrow, _ncol, _delr, _delc, _ = grid_dims(_grid)
+        # 补给量 = 格数 × 单格面积 × 速率。单格面积取 delr/delc 的均值乘积，
+        # 不写死 20×20 —— 换个网格就是另一个数。
+        _cell_area = float(np.mean(_delr)) * float(np.mean(_delc))
+        for _n, _r in sz_resolved.items():
+            _cells = len(_r.get("grid_indices") or [])
+            _rate = None
+            for _bc in json_ir.get("boundary_conditions", []) or []:
+                if isinstance(_bc, dict) and _bc.get("name") == _n:
+                    _raw = (_bc.get("parameters") or {}).get("rate")
+                    _rate = _raw.get("value") if isinstance(_raw, dict) else _raw
+                    break
+            try:
+                _flux_txt = f"，补给 {_cells * float(_rate) * _cell_area:.2f} m³/d"
+            except (TypeError, ValueError):
+                _flux_txt = ""
+            source_zone_rows.append(
+                f"源区 '{_n}': {_cells} 格 (占全域 {_cells/_total*100:.2f}%)，"
+                f"面积 {_r.get('area_m2', 0):.0f} m²{_flux_txt}"
+                f"，来源 {_r.get('resolved_from', '?')}"
+            )
+            monitor.info(source_zone_rows[-1])
+
     monitor.step("Step 3/3: FloPy 建模与 MODFLOW 6 模拟")
 
     # ── 诊断日志：建模前 dump IR 关键信息 ──
@@ -578,9 +1094,11 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
         viz_eng = VisualizationEngine()
 
         head_fig = empty_fig
-        map_html = "<p>模型运行成功</p>"
+        map_html = "<p>模型运行成功</p>" + warn_html
         plume_fig = empty_fig
+        plume_single = empty_fig
         process_fig = empty_fig
+        proc_result = None
         summary = {}
 
         if gwf:
@@ -608,114 +1126,27 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
                     f"Head Distribution (Balance Error: {summary.get('water_balance_error', 0)*100:.3f}%)")
 
                 # ── 底图叠加：检查是否上传了基底图/边界文件 ──
-                dm = get_session(sid)
-                file_data = dm.state.get("file_uploads", {})
-                if file_data:
-                    uploaded_paths = dm.state.get("_uploaded_file_paths", [])
-                    basemap_path = None
-                    shp_bounds = None
-                    shp_path = None
+                # 探测逻辑已抽到 _detect_basemap_inputs()，污染羽图复用同一结果
+                basemap_inputs = _detect_basemap_inputs(sid)
+                basemap_path = basemap_inputs["basemap_path"]
+                shp_path = basemap_inputs["shp_path"]
+                clip_shp_path = basemap_inputs["clip_shp_path"]
+                shp_bounds = basemap_inputs["shp_bounds"]
 
-                    # 1. 查找底图图片（优先 .tif GeoTIFF，其次 .png/.jpg）
-                    for up in uploaded_paths:
-                        fname = Path(up).name.lower()
-                        ext = Path(up).suffix.lower()
-                        # 底图关键词匹配
-                        is_basemap_name = any(kw in fname for kw in
-                            ['底图', 'basemap', 'base', 'map', '影像', 'image', 'satellite', '卫片'])
-                        if ext in ('.tif', '.tiff'):
-                            basemap_path = up
-                            if is_basemap_name:
-                                break  # 优先使用明确命名的底图
-                        elif ext in ('.png', '.jpg', '.jpeg', '.bmp'):
-                            if is_basemap_name:
-                                basemap_path = up
-                                break
-                            elif basemap_path is None:
-                                basemap_path = up  # 回退到任意图片
-
-                    # 2. 查找 SHP 边界 — 按名称匹配 "boundary"/"边界"，优先级：面 > 线
-                    shp_data = file_data.get("shapefiles", {})
-                    boundary_sph_name = dm.state.get("_boundary_shp_name", "")
-
-                    # 先收集所有候选边界文件
-                    boundary_candidates = []
-                    for name, info in shp_data.items():
-                        name_lower = name.lower()
-                        is_boundary = ('boundary' in name_lower or '边界' in name or
-                                       'border' in name_lower or name == boundary_sph_name)
-                        if is_boundary and info.get("bounds") and len(info["bounds"]) >= 4:
-                            b = info["bounds"]
-                            if all(isinstance(x, (int, float)) and not (x != x) for x in b[:4]):
-                                is_polygon = 'polygon' in info.get('geometry_type', '').lower()
-                                boundary_candidates.append((name, info, is_polygon))
-
-                    # 也加入 _polys 面要素作为裁剪用
-                    for name, info in shp_data.items():
-                        if 'poly' in name.lower() and info.get('geometry_type', '').lower() == 'polygon':
-                            if info.get("bounds"):
-                                b = info["bounds"]
-                                if all(isinstance(x, (int, float)) and not (x != x) for x in b[:4]):
-                                    if not any(c[0] == name for c in boundary_candidates):
-                                        boundary_candidates.append((name, info, True))
-
-                    # 选择边界：优先面要素，其次线要素
-                    polygon_candidates = [c for c in boundary_candidates if c[2]]
-                    line_candidates = [c for c in boundary_candidates if not c[2]]
-
-                    # 用于裁剪的面要素
-                    clip_shp_path = None
-                    if polygon_candidates:
-                        name, info, _ = polygon_candidates[0]
-                        b = info["bounds"]
-                        shp_bounds = b if shp_bounds is None else shp_bounds
-                        for up in uploaded_paths:
-                            if Path(up).stem == name and Path(up).suffix.lower() == '.shp':
-                                clip_shp_path = up
-                                break
-                        logger.info(f"边界裁剪面: {name} ({info['geometry_type']})")
-
-                    # 用于显示的线要素（Boundary_arcs）
-                    if line_candidates:
-                        name, info, _ = line_candidates[0]
-                        b = info["bounds"]
-                        shp_bounds = b if shp_bounds is None else shp_bounds
-                        if shp_path is None:
-                            for up in uploaded_paths:
-                                if Path(up).stem == name and Path(up).suffix.lower() == '.shp':
-                                    shp_path = up
-                                    break
-                        logger.info(f"边界显示线: {name} ({info['geometry_type']})")
-
-                    # 如果没有面要素用于裁剪，尝试找任何 _polys 文件
-                    if clip_shp_path is None:
-                        for name, info in shp_data.items():
-                            if 'poly' in name.lower() and 'polygon' in info.get('geometry_type', '').lower():
-                                for up in uploaded_paths:
-                                    if Path(up).stem == name and Path(up).suffix.lower() == '.shp':
-                                        clip_shp_path = up
-                                        break
-                                if clip_shp_path:
-                                    logger.info(f"使用面要素裁剪: {name}")
-                                    break
-
-                    logger.info(f"底图叠加: 显示线={shp_path}, 裁剪面={clip_shp_path}, 底图={basemap_path}")
-
-                    if basemap_path or shp_bounds:
-                        try:
-                            head_fig = viz_eng.plot_head_on_basemap(
-                                head, delr, delc,
-                                basemap_path=basemap_path,
-                                shp_bounds=shp_bounds,
-                                shp_path=shp_path,
-                                clip_shp_path=clip_shp_path,
-                                title=f"Head Distribution (Balance Error: {summary.get('water_balance_error', 0)*100:.3f}%)",
-                            )
-                            logger.info("底图叠加可视化完成")
-                        except Exception as e:
-                            logger.warning(f"底图叠加失败，使用默认可视化: {e}")
-                            import traceback
-                            logger.warning(traceback.format_exc())
+                if basemap_path or shp_bounds or shp_path or clip_shp_path:
+                    try:
+                        head_fig = viz_eng.plot_head_on_basemap(
+                            head, delr, delc,
+                            basemap_path=basemap_path,
+                            shp_bounds=shp_bounds,
+                            shp_path=shp_path,
+                            clip_shp_path=clip_shp_path,
+                            title=f"Head Distribution (Balance Error: {summary.get('water_balance_error', 0)*100:.3f}%)",
+                        )
+                        logger.info("底图叠加可视化完成")
+                    except Exception as e:
+                        logger.warning(f"底图叠加失败，使用默认可视化: {e}")
+                        logger.warning(traceback.format_exc())
 
                 # ── 保存图件上下文，供后续 NL 修改使用 ──
                 plot_styler.save_context(head=head, delr=delr, delc=delc,
@@ -726,8 +1157,21 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
                     f"<b>Head Range:</b> {summary.get('head_min', 0):.2f} ~ {summary.get('head_max', 0):.2f} m<br>"
                     f"<b>Water Balance Error:</b> {summary.get('water_balance_error', 0)*100:.4f}%<br>"
                     f"<b>Total Inflow:</b> {summary.get('total_flow_in', 0):.2f} m3/d<br>"
-                    f"<b>Total Outflow:</b> {summary.get('total_flow_out', 0):.2f} m3/d"
-                )
+                    f"<b>Total Outflow:</b> {summary.get('total_flow_out', 0):.2f} m3/d<br>"
+                    # 配置时长与实际时长并排显示：两者不一致时用户当场就能看出来，
+                    # 不用等到读时间轴末刻才发现"怎么是 150000 天"
+                    f"<b>计划模拟时长（来自 IR）:</b> {_planned_duration_text(json_ir)}"
+                ) + warn_html
+                # 源区那一行是用户能亲眼看到的"修复生效"证据：取代了旧代码
+                # 那句到不了任何 UI 组件的 logger.info
+                if source_zone_rows:
+                    map_html += (
+                        "<div style='margin-top:6px;padding:6px;background:#eef7ee;"
+                        "border-left:3px solid #4caf50'>"
+                        "<b style='color:#2e7d32'>源区定位</b><br>"
+                        + "<br>".join(source_zone_rows)
+                        + "</div>"
+                    )
 
                 if gwt:
                     try:
@@ -755,10 +1199,63 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
                             frames = [rp.extract_concentration_field(gwt, layer=0)]
                             frame_times = times[-1:] or [1.0]
 
+                        # 比流量场：污染羽图的流向箭头与主控过程辨识共用一份
+                        velocity = rp.extract_velocity_field(gwf, layer=0)
+
                         plume_fig = viz_eng.plot_plume_evolution(
                             frames, frame_times, delr, delc,
                             threshold=0.01, n_cols=min(3, len(frames)),
+                            basemap_path=basemap_path, shp_path=shp_path,
+                            clip_shp_path=clip_shp_path, shp_bounds=shp_bounds,
+                            velocity=velocity,
                         )
+
+                        # 单时刻交互图的初始帧（末时刻）
+                        if frames:
+                            plume_single = viz_eng.plot_plume_at_time(
+                                frames[-1], frame_times[-1], delr, delc,
+                                threshold=0.01,
+                                basemap_path=basemap_path, shp_path=shp_path,
+                                clip_shp_path=clip_shp_path, shp_bounds=shp_bounds,
+                                velocity=velocity,
+                            )
+
+                        # ── 主控过程辨识（"过程分析"Tab 的数据源） ──
+                        if len(frames) >= 2 and velocity is not None:
+                            proc_result = process_identifier.identify_dominant_process(
+                                conc_history=frames,
+                                # 稳态流场：速度不随时刻变化，按帧数复制即可
+                                # （ProcessIdentifier 要求 len >= n_times - 1）
+                                velocity_field=[velocity] * len(frames),
+                                parameters=_extract_process_params(json_ir),
+                                delr=delr, delc=delc,
+                            )
+                            process_fig = viz_eng.plot_process_analysis(proc_result)
+                        else:
+                            reason = ("可用输出时刻少于 2 个" if len(frames) < 2
+                                      else "流速场不可得（水头场或渗透系数缺失）")
+                            logger.warning(f"主控过程分析跳过: {reason}")
+                            map_html += (f"<br><span style='color:orange'>"
+                                         f"主控过程分析未生成：{reason}</span>")
+
+                        # ── 缓存供交互式重绘 ──
+                        c_max = float(max(np.max(c) for c in frames)) if frames else 0.0
+                        _result_cache[sid] = {
+                            "gwt": gwt, "gwf": gwf,
+                            "times": np.asarray(times, dtype=float),
+                            "delr": delr, "delc": delc, "layer": 0,
+                            "c_range": (0.0, c_max),
+                            "velocity": velocity,
+                            "basemap": basemap_inputs,
+                            "workspace": workspace,
+                            "_frame_cache": {float(t): f
+                                             for t, f in zip(frame_times, frames)},
+                        }
+
+                        # 让"图件修改"Tab 知道存在污染羽数据（_conc_frames 此前无人写）
+                        plot_styler.save_context(head=head, delr=delr, delc=delc,
+                                                 wells=json_ir.get("wells"),
+                                                 conc_frames=frames, plot_type="head")
                     except Exception as e:
                         logger.warning(f"污染羽演化图绘制失败: {e}")
                         logger.warning(traceback.format_exc())
@@ -768,11 +1265,32 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
                 logger.error(traceback.format_exc())
                 map_html = f"<p style='color:orange'>结果提取失败: {e}</p>"
 
+        # 图件落盘：必须在 plt.close("all") 之前，且报告要引用这些路径。
+        # 文件名用 ASCII、显示名用中文 —— _add_figures 把 key 当段落标题、value 当路径。
+        viz_files = {}
+        try:
+            fig_dir = workspace / "figures"
+            fig_dir.mkdir(parents=True, exist_ok=True)
+            for label, stem, fig in (("水头分布", "head", head_fig),
+                                     ("污染羽演化总览", "plume_evolution", plume_fig),
+                                     ("污染羽单时刻", "plume_single", plume_single),
+                                     ("主控过程分析", "process_analysis", process_fig)):
+                if fig is None or fig is empty_fig:
+                    continue
+                p = fig_dir / f"{stem}.png"
+                fig.savefig(p, dpi=150, bbox_inches="tight")
+                viz_files[label] = str(p)
+            logger.info(f"报告图件已落盘: {list(viz_files.keys())}")
+        except Exception as e:
+            logger.warning(f"图件落盘失败: {e}")
+
         report_path = None
         try:
             rg = ReportGenerator()
             report_path = rg.generate(json_ir=json_ir, validation_log=val_result.get("issues", []),
-                                      sim_results=summary, model_id=sid or "default")
+                                      sim_results=summary, model_id=sid or "default",
+                                      process_analysis=proc_result,
+                                      visualizations=viz_files or None)
         except Exception as e:
             logger.warning(f"报告生成失败: {e}")
 
@@ -937,7 +1455,8 @@ def create_ui():
                     send_btn = gr.Button("发送", variant="primary", scale=3)
                     file_upload = gr.File(label="📎 上传文件", file_count="multiple",
                         file_types=[".zip", ".shp", ".shx", ".dbf", ".prj", ".geojson", ".kml",
-                                    ".xlsx", ".xls", ".csv", ".tif", ".tiff", ".asc"])
+                                    ".xlsx", ".xls", ".csv", ".tif", ".tiff", ".asc",
+                                    ".png", ".jpg", ".jpeg", ".bmp"])
                 with gr.Row():
                     clear_btn = gr.Button("清空", variant="secondary", size="sm")
                     auto_fill_btn = gr.Button("建议补全", variant="secondary", size="sm")
@@ -965,7 +1484,8 @@ def create_ui():
 | **KML/KMZ** | `.kml` | 🌍 Google Earth 导出 | 支持从 Google Earth 导入边界 |
 | **Excel** | `.xlsx`, `.xls` | 📊 井信息、调查点、地层 | 自动识别坐标列（x/y, 经度/纬度, E/N） |
 | **CSV** | `.csv` | 📋 时间序列、点位 | 纯文本表格，适合大量数据 |
-| **GeoTIFF** | `.tif`, `.tiff` | 🏔️ DEM 高程、参数分布 | 含地理参考的栅格数据 |
+| **GeoTIFF** | `.tif`, `.tiff` | 🏔️ DEM 高程、参数分布、底图影像 | 含地理参考的栅格数据，会按真实地理坐标叠加 |
+| **图片底图** | `.png`, `.jpg`, `.jpeg`, `.bmp` | 🗺️ 底图影像 | 无地理参考，按模型范围或 SHP 外框铺放 |
 | **ASCII Grid** | `.asc` | 🏔️ 栅格数据 | ESRI ASCII 栅格格式 |
 
 ---
@@ -1011,7 +1531,23 @@ def create_ui():
             with gr.TabItem("💧 水头分布"):
                 head_plot = gr.Plot(label="水头等值线")
             with gr.TabItem("☣️ 污染羽"):
-                plume_plot = gr.Plot(label="污染羽演化")
+                gr.Markdown("#### 演化总览")
+                plume_plot = gr.Plot(label="污染羽演化总览")
+                gr.Markdown("#### 单时刻交互图")
+                with gr.Row():
+                    plume_time_slider = gr.Slider(
+                        minimum=0, maximum=1, value=1, step=1,
+                        label="输出时刻 (d)",
+                        info="拖动选择；落在两个输出时刻之间时自动线性插值")
+                    plume_time_num = gr.Number(
+                        value=None, precision=0, label="精确时刻 (d)",
+                        info="可直接输入，例如 360")
+                with gr.Row():
+                    plume_auto_range = gr.Checkbox(value=True, label="自动色标范围")
+                    plume_vmin = gr.Number(value=None, label="浓度下限 (mg/L)")
+                    plume_vmax = gr.Number(value=None, label="浓度上限 (mg/L)")
+                plume_single_plot = gr.Plot(label="污染羽单时刻")
+                plume_status = gr.Markdown("完成建模后可在此选择时刻与浓度范围。")
             with gr.TabItem("📈 过程分析"):
                 process_plot = gr.Plot(label="主控过程贡献")
             with gr.TabItem("🎨 图件修改"):
@@ -1068,8 +1604,29 @@ def create_ui():
             )
 
         # 按钮绑定（放在 debug_log 定义之后）
+        # .then() 里同步污染羽交互控件：这样 run_model_handler 的 7 元组返回值
+        # 完全不用动（它有 8 个 return 点，7 个是错误早退分支，逐个加元素易错）。
         run_btn.click(run_model_handler, [param_panel, sid_state],
-                      [head_plot, result_text, plume_plot, process_plot, report_download, code_preview, debug_log])
+                      [head_plot, result_text, plume_plot, process_plot, report_download, code_preview, debug_log]
+                      ).then(
+            _sync_plume_controls, [sid_state],
+            [plume_time_slider, plume_time_num, plume_vmin, plume_vmax,
+             plume_single_plot, plume_status])
+
+        # 污染羽交互控件：滑块 ⇄ 数字框双向同步，色标范围改动即重绘
+        plume_time_slider.release(
+            _on_plume_slider,
+            [plume_time_slider, plume_auto_range, plume_vmin, plume_vmax, sid_state],
+            [plume_single_plot, plume_status, plume_time_num, plume_vmin, plume_vmax])
+        plume_time_num.submit(
+            _on_plume_number,
+            [plume_time_num, plume_auto_range, plume_vmin, plume_vmax, sid_state],
+            [plume_single_plot, plume_status, plume_time_slider, plume_vmin, plume_vmax])
+        for _w in (plume_auto_range, plume_vmin, plume_vmax):
+            _w.change(
+                _on_plume_number,
+                [plume_time_num, plume_auto_range, plume_vmin, plume_vmax, sid_state],
+                [plume_single_plot, plume_status, plume_time_slider, plume_vmin, plume_vmax])
 
         # 图件修改按钮
         plot_modify_btn.click(

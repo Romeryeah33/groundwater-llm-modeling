@@ -5,6 +5,26 @@
 和格式化的参数缺失指南渲染（Markdown / HTML）。
 """
 
+
+def _range_text(param: str, fmt: str = "g") -> str:
+    """
+    从 `ParameterRangeConstraint.PHYSICAL_RANGES` 取上界，供 `valid_range` 文案使用。
+
+    为什么惰性 import：`app.knowledge` 是叶子层，而 `app.physics_engine.constraints`
+    已经 import 了 `app.knowledge.semantic_db`，在模块顶层反向 import 会形成
+    包级循环。放到函数里，import 只在实际渲染指南时发生。
+
+    为什么要取而不是抄：这里原先写死"瞬态: 1~100期, 每期1~3650天"，与实际生效的
+    范围（见 `PHYSICAL_RANGES`）不一致，等于对用户说谎。抄一份常量必然会再漂移。
+    """
+    try:
+        from app.physics_engine.constraints import ParameterRangeConstraint
+        hi = ParameterRangeConstraint.PHYSICAL_RANGES[param][1]
+        return f"{hi:.0e}" if fmt == "e" else f"{int(hi):d}"
+    except Exception:  # pragma: no cover - 仅文案，取不到就不显示上界
+        return "?"
+
+
 # ================================================================
 # 参数指南数据
 # ================================================================
@@ -126,11 +146,20 @@ PARAM_GUIDE = {
         "display_name_cn": "应力期设置",
         "nature": "模拟的时间离散方案，包括是稳态还是瞬态、模拟时长、应力期数量和步长",
         "priority": "P2（影响性）— 缺少则使用默认稳态单期",
-        "valid_range": "稳态: 1期; 瞬态: 1~100期, 每期1~3650天",
-        "format": "字典，包含 nper, steady_state, perlen 等字段。"
-                 "稳态示例: {\"nper\": 1, \"steady_state\": true, \"perlen\": 1.0}",
+        "valid_range": f"稳态: 1期; 瞬态: nper 1~{_range_text('nper')} 期, "
+                       f"total_time 1e-3~{_range_text('total_time', 'e')} 天, "
+                       f"perlen 1e-3~{_range_text('perlen', 'e')} 天/期, "
+                       f"nstp 1~{_range_text('nstp')}",
+        # 注意字段语义：**总时长用 total_time，不要用 perlen**。
+        # `perlen` 按 MF6 原生语义是**单个**应力期的长度，用户说"模拟时长15000天、
+        # 分为10个应力期"时若写成平铺 perlen=15000，总时长会变成 150000 天（差 10 倍）。
+        # 早期这里唯一的示例正是平铺 perlen，是那个 bug 的误导来源之一。
+        "format": "字典，包含 nper / steady_state / total_time / nstp 等字段。"
+                 "瞬态示例: {\"nper\": 10, \"steady_state\": false, \"total_time\": 15000, \"nstp\": 1}。"
+                 "total_time 是**总**模拟时长，程序按 total_time/nper 等分每期长度。",
         "unit": "天 (d)",
-        "example": "模拟期为稳态（或：模拟100天的瞬态过程，分为10个应力期）",
+        "example": "模拟时长15000天，均匀分为10个应力期，每个应力期1个时间步"
+                   "（→ {\"nper\": 10, \"steady_state\": false, \"total_time\": 15000, \"nstp\": 1}）",
         "why_needed": "决定模拟是稳态还是瞬态，以及时间分辨率",
     },
     "aquifer.parameters.sy": {

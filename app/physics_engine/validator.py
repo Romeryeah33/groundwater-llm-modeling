@@ -21,6 +21,7 @@ from app.physics_engine.constraints import (
     UnitConsistencyConstraint,
     NumericalStabilityConstraint,
 )
+from app.utils.ir_normalize import merge_time_sources, normalize_stress_periods
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,10 @@ class ClosedLoopValidator:
             # === Layer 5: 数值稳定性校验 ===
             stability_issues = self._check_stability(current_ir)
             iteration_issues.extend(stability_issues)
+
+            # === Layer 5b: 时间离散自洽性 ===
+            time_issues = self._check_time_discretization(current_ir)
+            iteration_issues.extend(time_issues)
 
             # === Layer 6: 预运行校验 ===
             prun_issues = self._check_pre_run(current_ir)
@@ -357,6 +362,18 @@ class ClosedLoopValidator:
 
         return issues
 
+    @staticmethod
+    def _as_float(v) -> Optional[float]:
+        """宽松取数：``{value: ...}`` 解包 + 不可转换返回 None（不抛）"""
+        if isinstance(v, dict):
+            v = v.get("value")
+        if v is None or isinstance(v, bool):
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
     def _estimate_gradient(self, bcs: list, L: float) -> float:
         """从边界条件估计水力梯度"""
         chd_heads = []
@@ -395,10 +412,29 @@ class ClosedLoopValidator:
         )
 
         # Courant 数检查（如果有应力期信息）
-        stress = json_ir.get("stress_periods", {})
-        if not isinstance(stress, dict):
-            stress = {}
+        stress = normalize_stress_periods(json_ir.get("stress_periods", {}))
         period_data = stress.get("period_data", [])
+        # 合成回退：只有平铺 perlen/total_time、没有 period_data 时，
+        # 之前这一层**完全瞎了**（`if period_data:` 直接跳过）。
+        #
+        # 但合成的时期**必须把严重度上限压到 WARNING**：`nstp` 缺省为 1 会算出
+        # Δt=perlen 这种虚构的大步长，而 `model_builder._ensure_transport_timesteps`
+        # 本来就会自己提升 nstp。用它报 ERROR 等于拿一个不存在的 Δt 去阻断用户。
+        synthesized = False
+        _n_before = len(issues)
+        if not period_data:
+            _perlen = self._as_float(stress.get("perlen"))
+            _total = self._as_float(stress.get("total_time"))
+            _nper = self._as_float(stress.get("nper"))
+            if _total and _total > 0 and _nper and _nper > 0:
+                _perlen_rep = _total / _nper
+            else:
+                _perlen_rep = _perlen
+            if _perlen_rep and _perlen_rep > 0:
+                period_data = [{"perlen": _perlen_rep,
+                                "nstp": self._as_float(stress.get("nstp")) or 1}]
+                synthesized = True
+
         if period_data:
             aqua = json_ir.get("aquifer", {}).get("parameters", {})
             hk = aqua.get("hk", {}).get("value", 1.0)
@@ -438,6 +474,139 @@ class ClosedLoopValidator:
                     NumericalStabilityConstraint.check_time_step(dx, v_max, n)
                 )
 
+        if synthesized:
+            # 见上面的说明：这些结论建立在**合成**的时期上，Δt 是估计值。
+            # 降级到 WARNING，绝不用它阻断建模。
+            for _i in range(_n_before, len(issues)):
+                issues[_i].severity = (
+                    ConstraintSeverity.WARNING
+                    if issues[_i].severity == ConstraintSeverity.ERROR
+                    else issues[_i].severity
+                )
+                issues[_i].description = (
+                    f"[基于合成的代表期，Δt 为估计值] {issues[_i].description}"
+                )
+
+        return issues
+
+    # ================================================================
+    # Layer 5b: 时间离散自洽性
+    # ================================================================
+
+    def _check_time_discretization(self, json_ir: dict) -> List[ConstraintResult]:
+        """
+        总时长 / 应力期数 / 单期长度三者的关系。
+
+        为什么单独立一层：**单参数的上下界管不住这类错**。East Texas 案例里
+        ``transport.stress_periods = {nper: 10, perlen: 15000}``，每个值都落在
+        物理范围内，但按 MF6 语义 ``perlen`` 是**每个**应力期的长度，
+        10 × 15000 = 150000 d，而提示词要的是 15000 d（"均匀分为10个应力期"）。
+        用户"想看 360 天"落空的真正原因就在这里，而此前没有任何一层报错 ——
+        `_check_stability` 只在 ``period_data`` 非空时跑 Courant，本案例没有
+        ``period_data``，整层直接跳过。
+
+        规则：
+          - ``total_time`` 与 ``period_data`` 同时给出且总和不符（>1%）→ **ERROR**。
+            两个来源直接矛盾，必有一个是错的，不能替用户猜。
+          - ``total_time`` 与平铺 ``perlen`` 不符 → **WARNING**。
+            ``model_mapper._map_time_params`` 已有确定的优先级（``total_time``
+            按 nper 等分并覆盖平铺 perlen），模型能正确建出来，所以不阻断，
+            但必须让用户看见。
+          - 总时长 > 1e5 d 且启用了运移 → **WARNING**。长时段模拟本身合法
+            （百年尺度污染运移很常见），只提醒确认。
+        """
+        issues: List[ConstraintResult] = []
+
+        stress = merge_time_sources(json_ir)
+        if not stress:
+            return issues
+
+        total_time = self._as_float(stress.get("total_time"))
+        nper = self._as_float(stress.get("nper"))
+        perlen = self._as_float(stress.get("perlen"))
+        period_data = stress.get("period_data") or []
+        if not isinstance(period_data, list):
+            period_data = []
+        period_data = [pd for pd in period_data if isinstance(pd, dict)]
+
+        if period_data:
+            span: Optional[float] = sum(
+                self._as_float(pd.get("perlen")) or 0.0 for pd in period_data
+            )
+            n_per = len(period_data)
+        elif perlen is not None and perlen > 0 and nper and nper > 0:
+            span = perlen * nper
+            n_per = int(nper)
+        else:
+            span = None
+            n_per = int(nper) if nper else 1
+
+        if total_time and total_time > 0 and span and span > 0:
+            if abs(span - total_time) > 0.01 * total_time:
+                if period_data:
+                    issues.append(ConstraintResult(
+                        constraint_type="time_discretization",
+                        param_name="total_time",
+                        is_valid=False,
+                        severity=ConstraintSeverity.ERROR,
+                        current_value=span,
+                        valid_range=(total_time, total_time),
+                        unit="d",
+                        description=(
+                            f"total_time={total_time:g} d 与 period_data 各期 perlen "
+                            f"之和 {span:g} d 不符"
+                            f"（相差 {abs(span-total_time)/total_time*100:.1f}%）"
+                        ),
+                        suggestion=(
+                            f"二者只能有一个对：要么把 total_time 改成 {span:g} d，"
+                            f"要么改 period_data 使 perlen 之和为 {total_time:g} d"
+                        ),
+                    ))
+                else:
+                    issues.append(ConstraintResult(
+                        constraint_type="time_discretization",
+                        param_name="perlen",
+                        is_valid=True,
+                        severity=ConstraintSeverity.WARNING,
+                        current_value=perlen,
+                        unit="d",
+                        description=(
+                            f"total_time={total_time:g} d 与平铺 perlen={perlen:g} d × "
+                            f"nper={n_per}（共 {span:g} d）不符。perlen 按 MF6 语义是"
+                            f"**单个**应力期的长度，极易被误读成总时长。"
+                            f"建模时以 total_time 为准，每期将取 "
+                            f"{total_time / max(n_per, 1):g} d"
+                        ),
+                        suggestion=(
+                            f"若 {total_time:g} 天是**总**模拟时长，保留 total_time 即可"
+                            "（不要再写平铺 perlen）；若确实是每期长度，请去掉 total_time"
+                        ),
+                    ))
+            # 一致时不提示：total_time == perlen 只在 nper==1 时才自洽，
+            # 而 nper>1 时一定会在上面命中 WARNING，无需额外分支
+
+        # 长时段提醒
+        if span and span > 1e5:
+            hint = ""
+            if not total_time and perlen and n_per > 1:
+                hint = (
+                    f"（若 {perlen:g} 天其实是**总**模拟时长，请改写成 "
+                    f"\"total_time\": {perlen:g}，否则会被按每期 {perlen:g} 天解释）"
+                )
+            issues.append(ConstraintResult(
+                constraint_type="time_discretization",
+                param_name="total_time",
+                is_valid=True,
+                severity=ConstraintSeverity.WARNING,
+                current_value=span,
+                unit="d",
+                description=(
+                    f"模拟总时长为 {span:g} d（{span/365.25:.1f} 年），请确认是否符合预期。"
+                    f"{hint}"
+                ),
+                suggestion="长时段模拟会显著增加运行时间与输出体积",
+            ))
+
         return issues
 
     # ================================================================
@@ -455,7 +624,13 @@ class ClosedLoopValidator:
         issues = []
 
         # 检查边界条件是否与应力期数量匹配
-        stress = json_ir.get("stress_periods", {})
+        #
+        # 必须走 normalize_stress_periods：`stress_periods` 在真实 IR 里可能是
+        # 裸整数（East Texas 顶层就是 `10`，表示"分 10 个应力期"），直接
+        # `.get("nper")` 会抛 `AttributeError: 'int' object has no attribute 'get'`，
+        # 而本函数从 `validate()` 可达（`_check_stability` 有 isinstance 守卫，
+        # 这里原先漏了）。
+        stress = normalize_stress_periods(json_ir.get("stress_periods"))
         nper = stress.get("nper", 1)
         bcs = json_ir.get("boundary_conditions", [])
 
@@ -604,6 +779,7 @@ def quick_validate(json_ir: dict) -> dict:
     all_issues.extend(validator.unit_check.check_unit_consistency(json_ir))
     all_issues.extend(validator._check_physics(json_ir))
     all_issues.extend(validator._check_stability(json_ir))
+    all_issues.extend(validator._check_time_discretization(json_ir))
 
     errors = [i for i in all_issues if i.severity == ConstraintSeverity.ERROR]
     warnings = [i for i in all_issues if i.severity == ConstraintSeverity.WARNING]

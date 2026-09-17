@@ -9,6 +9,18 @@ from typing import Optional
 
 import numpy as np
 
+from app.modeling.source_zone import (
+    NO_EDGE_INFERENCE_TYPES,
+    SourceZoneUnresolved,
+    infer_edge_indices,
+    unresolved_message,
+)
+from app.utils.ir_normalize import (
+    TIME_KEYS,
+    merge_time_sources,
+    normalize_stress_periods,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -178,70 +190,22 @@ class FloPyModelMapper:
     # 边界条件映射
     # ================================================================
 
-    def _infer_edge_indices(self, bc_name: str, grid: dict, layer=None) -> list:
+    def _infer_edge_indices(self, bc_name: str, grid: dict, layer=None,
+                            bc_type: str = None) -> list:
         """
         从边界名称推断网格边界的 IJ 索引
 
         支持：west/西/left/左, east/东/right/右, north/北/top/上, south/南/bottom/下
 
-        注意：不使用单字符关键词（如 "w"/"e"/"n"/"s"），
-        因为它们会与井名（"well"→含"w"→误判为west）、
-        复合方向（"northeast"→含"east"→误判为east）等产生误匹配。
+        不使用单字符关键词（如 "w"/"e"/"n"/"s"），因为它们会与井名
+        （"well"→含"w"→误判为west）、复合方向（"northeast"→含"east"→误判为east）
+        等产生误匹配。
+
+        实现已下沉到 `app.modeling.source_zone.infer_edge_indices`，与源区解析器
+        共用同一份关键词表 —— 否则"是不是方位型名称"会有两份判断，对
+        `top_of_landfill` 这类名字给出不同答案。`rch`/`evt`/`wel` 一律返回空。
         """
-        name_lower = (bc_name or "").lower()
-        nrow = int(self._unwrap_value(grid.get("nrow"), 50) or 50)
-        ncol = int(self._unwrap_value(grid.get("ncol"), 50) or 50)
-
-        # layer=None 表示铺满所有层。多层模型若只在 layer0 设边界，
-        # 其余层将没有任何边界条件（水头无处排泄）。
-        if layer is None:
-            nlay = int(self._unwrap_value(grid.get("nlay"), 1) or 1)
-            layers = list(range(max(1, nlay)))
-        else:
-            layers = [int(layer)]
-
-        # 注意：只使用有区分力的关键词，不含单字母匹配
-        # 使用单词边界匹配避免 "northeast" 匹配到 "east" 等问题
-        west_keywords = ("west", "西", "左", "left", "xmin")
-        east_keywords = ("east", "东", "右", "right", "xmax")
-        north_keywords = ("north", "北", "上", "top", "ymax")
-        south_keywords = ("south", "南", "下", "bottom", "ymin")
-
-        # 辅助函数：检查关键词是否作为独立单词出现（而非其他词的子串）
-        def _word_match(text: str, keywords: tuple) -> bool:
-            for kw in keywords:
-                idx = text.find(kw)
-                if idx < 0:
-                    continue
-                # 对中文字符（非ASCII）关键词，使用简单子串匹配
-                # 因为 "西" 应该匹配 "西侧边界"
-                if any(ord(c) > 127 for c in kw):
-                    return True
-                # 对 ASCII 关键词，检查单词边界：
-                # "east" 应匹配 "east_boundary"，但不应匹配 "northeast"
-                before_ok = idx == 0 or not text[idx - 1].isalpha()
-                after_ok = (idx + len(kw) >= len(text)) or not text[idx + len(kw)].isalpha()
-                if before_ok and after_ok:
-                    return True
-            return False
-
-        indices = []
-
-        def _edge(cells):
-            for lay in layers:
-                for r, c in cells:
-                    indices.append({"layer": lay, "row": r, "col": c, "period": 0})
-
-        if _word_match(name_lower, west_keywords):
-            _edge([(r, 0) for r in range(nrow)])
-        elif _word_match(name_lower, east_keywords):
-            _edge([(r, ncol - 1) for r in range(nrow)])
-        elif _word_match(name_lower, north_keywords):
-            _edge([(0, c) for c in range(ncol)])
-        elif _word_match(name_lower, south_keywords):
-            _edge([(nrow - 1, c) for c in range(ncol)])
-
-        return indices
+        return infer_edge_indices(bc_name, grid, layer=layer, bc_type=bc_type)
 
     def map_boundary_conditions(self, json_ir: dict) -> dict:
         """
@@ -253,13 +217,9 @@ class FloPyModelMapper:
             {package_name: {period: [(cell_data), ...], ...}, ...}
         """
         bcs = json_ir.get("boundary_conditions", [])
-        stress_periods = json_ir.get("stress_periods", {})
-        # 防御：stress_periods 可能是字符串（LLM 未正确生成 dict）
-        if isinstance(stress_periods, str):
-            stress_periods = {}
-        if isinstance(stress_periods, list):
-            # 列表格式：[{"nper": 1, "steady": true}, ...]
-            stress_periods = stress_periods[0] if stress_periods else {}
+        # 归一化实现已下沉到 app.utils.ir_normalize，与 validator 共用一份
+        # （stress_periods 可能是裸整数 / 字符串 / 列表 / bool，见该模块说明）
+        stress_periods = normalize_stress_periods(json_ir.get("stress_periods", {}))
         nper = stress_periods.get("nper", 1) if isinstance(stress_periods, dict) else 1
         grid = json_ir.get("grid", {})
 
@@ -294,7 +254,7 @@ class FloPyModelMapper:
             # 如果没有显式索引，尝试从名称推断
             if not indices:
                 bc_name = bc.get("name", "")
-                inferred = self._infer_edge_indices(bc_name, grid)
+                inferred = self._infer_edge_indices(bc_name, grid, bc_type=bc_type)
                 if inferred:
                     indices = inferred
                     logger.info(f"边界 '{bc_name}' 自动推断为 {len(indices)} 个网格单元")
@@ -367,8 +327,38 @@ class FloPyModelMapper:
                 raw_r = params.get("rate", 0.0)
                 rate = raw_r.get("value", 0.0) if isinstance(raw_r, dict) else float(raw_r)
 
+                # 补给率作用范围：
+                #   "zone"（默认）—— 补给只发生在源区。BC 是**源项**边界，其速率
+                #                    只应作用于源区；全场天然补给是**另一条** BC
+                #                    （无浓度、标量 rate），走下面 elif rate != 0 分支。
+                #   "domain"      —— 全域按 rate 补给，但浓度只在源区内为 conc，
+                #                    其余格子取 background_concentration。这是原始
+                #                    MT3DMS 台面的形态（全域浓度数组，只有填埋场为
+                #                    20000，其余为 0）。
+                scope = str(self._unwrap_value(params.get("recharge_scope"), "zone") or "zone").lower()
+                bg = self._unwrap_value(params.get("background_concentration"), 0.0)
+
                 if indices:
                     # cell-by-cell 补给（如填埋场多边形）
+                    nrow = int(grid.get("nrow", 1) or 1)
+                    ncol = int(grid.get("ncol", 1) or 1)
+                    if scope in ("domain", "all", "全域", "全局") and conc is not None:
+                        # 源区浓度 + 补集本底浓度。显式给出全部格子，避免依赖 MF6
+                        # 对未列出格子的缺省行为。
+                        in_zone = {(int(i.get("row", 0)), int(i.get("col", 0)))
+                                   for i in indices}
+                        bg = 0.0 if bg is None else float(bg)
+                        per0 = int(indices[0].get("period", 0) or 0)
+                        packages[package_name][per0] = [
+                            (0, r, c, rate, conc if (r, c) in in_zone else bg)
+                            for r in range(nrow) for c in range(ncol)
+                        ]
+                        logger.info(
+                            f"RCH 补给 scope=domain：{nrow*ncol} 格按 {rate:g} 补给，"
+                            f"其中 {len(in_zone)} 格浓度 {conc:g}、"
+                            f"{nrow*ncol-len(in_zone)} 格浓度 {bg:g}"
+                        )
+                        continue
                     for idx in indices:
                         per = idx.get("period", 0)
                         if per not in packages[package_name]:
@@ -379,21 +369,33 @@ class FloPyModelMapper:
                             entry.append(conc)
                         packages[package_name][per].append(tuple(entry))
                 elif conc is not None:
-                    # 有浓度但没给注入位置：展开为 layer0 全网格。
-                    # 不能退化成均匀标量形式 —— 一旦声明 AUXILIARY，
-                    # MF6 会按辅助变量个数读取列表，标量形式会读错位。
-                    # 注：rate=0 且带浓度是合法的纯示踪注入场景。
-                    nrow = int(grid.get("nrow", 1) or 1)
-                    ncol = int(grid.get("ncol", 1) or 1)
-                    logger.info(
-                        f"RCH 补给浓度 {conc} 未指定注入位置，"
-                        f"展开为 layer0 全网格（{nrow}×{ncol}）"
-                    )
-                    packages[package_name][0] = [
-                        (0, r, c, rate, conc) for r in range(nrow) for c in range(ncol)
-                    ]
+                    # 有浓度但没有可解析的注入位置。
+                    #
+                    # 这里**必须拒绝**，绝不能像以前那样展开成 layer0 全网格：
+                    # East Texas 案例中填埋场只有 132 格（0.59%），静默展开成
+                    # 22454 格把源放大了 170 倍，污染羽于是变成一张覆盖全域的
+                    # 毯子、看起来像水流模型结果，而日志里只有一句到不了 UI 的
+                    # info。宁可让用户看见错误，也不要给出静默错误的模型。
+                    raise SourceZoneUnresolved(unresolved_message(bc, grid))
                 elif rate != 0:
-                    packages[package_name][0] = rate
+                    # 全场天然补给：无浓度、标量速率。这正是 `scope="zone"` 所
+                    # 依赖的独立通道（见上面注释）。
+                    #
+                    # 但 `package_name` 只由 bc_type 决定，所有 rch BC **共用同一个
+                    # "rch" 包**。若前一条 rch BC 已经往 period 0 写了逐格记录，
+                    # 这里直接赋值会把它整条抹掉（标量与列表在同一包里无法共存）。
+                    # 那种静默覆盖和本轮要消灭的 bug 是同一类，所以拒绝覆盖。
+                    if 0 in packages[package_name]:
+                        logger.warning(
+                            f"RCH '{bc.get('name')}' 是全场标量补给，但 period 0 已有"
+                            f"{len(packages[package_name][0])} 条逐格记录（来自先前的 rch BC 或"
+                            f"源区解析），已保留逐格记录、忽略该标量。"
+                            f"如需「源区 + 全场天然补给」并存，请改用单条 BC 的 "
+                            f"parameters.recharge_scope=\"domain\" + background_concentration，"
+                            f"或把天然补给拆到独立模型"
+                        )
+                    else:
+                        packages[package_name][0] = rate
 
             elif bc_type == "riv":
                 raw_s = params.get("stage", 0.0); stage = raw_s.get("value", 0.0) if isinstance(raw_s, dict) else float(raw_s)
@@ -631,50 +633,57 @@ class FloPyModelMapper:
         stress_periods 只剩一个裸整数（如 nper=10）。这里做了回退，避免
         退化成"只算 1 天"。
         """
-        stress = json_ir.get("stress_periods", {})
-
         # 防御：stress_periods 可能是字符串 / 列表 / **裸数字**。
         # LLM 常写 "stress_periods": 10 表示"分 10 个应力期"——按 nper 读，
         # 否则会退化成"只算 1 个 1 天的应力期"。
-        if isinstance(stress, str):
-            stress = {}
-        elif isinstance(stress, bool):
-            stress = {}
-        elif isinstance(stress, (int, float)):
-            stress = {"nper": int(stress)}
-        if isinstance(stress, list):
-            stress = stress[0] if stress else {}
-        if not isinstance(stress, dict):
-            stress = {}
+        # 归一化实现已下沉到 app.utils.ir_normalize，与 validator 共用一份。
+        stress = normalize_stress_periods(json_ir.get("stress_periods", {}))
 
         # 回退到 transport.stress_periods。**两种情况都要回退**：
         #   1) 顶层连 nper 都没有（缺失 / 非法）
-        #   2) 顶层只带 nper、没有 perlen/nstp/period_data
+        #   2) 顶层只带 nper、没有 perlen/nstp/period_data/total_time
         # 第 2 种正是 East Texas 的形态：顶层是裸整数 10，真实的时间信息
         # {nper:10, perlen:15000} 被 LLM 塞进了 transport.stress_periods。
         # 只看 nper 判断的话这里不会回退，perlen 就退化成 1 天。
-        fallback = (json_ir.get("transport") or {}).get("stress_periods")
-        if isinstance(fallback, dict):
-            _TIME_KEYS = ("perlen", "nstp", "tsmult", "period_data")
-            no_nper = not stress.get("nper")
-            no_time = not any(stress.get(k) for k in _TIME_KEYS)
-            if (no_nper or no_time) and fallback.get("nper"):
-                logger.warning(
-                    f"顶层 stress_periods 缺少 "
-                    f"{'nper' if no_nper else 'perlen/nstp/period_data'}，"
-                    f"从 transport.stress_periods 补齐时间信息"
-                )
-                merged = dict(fallback)
-                # 顶层已显式给出的键优先
-                merged.update({k: v for k, v in stress.items() if v})
-                stress = merged
+        # 合并逻辑已下沉到 `app.utils.ir_normalize.merge_time_sources`，
+        # 与校验层共用一份（否则"时间信息在哪"会有两种判断）。
+        merged = merge_time_sources(json_ir)
+        if merged is not stress:
+            logger.warning("顶层 stress_periods 不完整，已从 transport.stress_periods 补齐时间信息")
+        stress = merged
 
         nper = int(self._unwrap_value(stress.get("nper"), 1) or 1)
         perlen = float(self._unwrap_value(stress.get("perlen"), 1.0) or 1.0)
         nstp = int(self._unwrap_value(stress.get("nstp"), 1) or 1)
         tsmult = float(self._unwrap_value(stress.get("tsmult"), 1.0) or 1.0)
 
+        # total_time 是**一等公民**的"总模拟时长"，优先级高于平铺 perlen。
+        #
+        # 为什么需要它：用户提示词说的是"模拟时长15000天，均匀分为10个应力期"，
+        # 但 `perlen` 按 MF6 原生语义是**每个**应力期的长度，10 × 15000 就是
+        # 150000 d（差 10 倍）。而 LLM 无处安放"总时长"这个量 —— schema 里没有
+        # 这个字段，`param_guide` 里唯一的示例还把 perlen 平铺在顶层。
+        # 给了 total_time 就按 nper 等分，这是确定性的，不依赖 LLM 猜。
+        total_time = self._unwrap_value(stress.get("total_time"), None)
         period_data = stress.get("period_data") or []
+        if total_time is not None and not period_data:
+            try:
+                total_time = float(total_time)
+            except (TypeError, ValueError):
+                total_time = None
+            if total_time and total_time > 0 and nper > 0:
+                stale = stress.get("perlen")
+                if stale:
+                    logger.warning(
+                        f"time: total_time={total_time:g} d 覆盖平铺 perlen={stale}"
+                        f"（后者按 MF6 语义是单期长度，二者极易混淆）"
+                    )
+                perlen = total_time / nper
+                logger.info(
+                    f"时间离散: total_time={total_time:g} d 按 {nper} 期等分，"
+                    f"每期 perlen={perlen:g} d"
+                )
+
         if not period_data:
             # 关键：由 nper/perlen/nstp 合成，而不是退化成单个 1 天步长
             period_data = [

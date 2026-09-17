@@ -1,4 +1,10 @@
 """
+East Texas 验证：Case C（本体，Gate 5）+ Case D（污染源区回归锁）
+
+用法：
+  python scripts/verify_east_texas.py        # Case C，会真跑 mf6（几分钟）
+  python scripts/verify_east_texas.py D      # Case D，只构建+落盘，不跑 mf6（几秒）
+
 Case C — East Texas 本体（Gate 5）
 
 不直接跑 `data/sessions/default.json`：那份 IR 有若干物理设计缺陷，
@@ -295,7 +301,362 @@ def check_case_c(res, ws):
     return ok
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# Case D — SHP 名称匹配路径（污染源区回归锁）
+#
+# 为什么必须有这一条：Case B/C 都在 IR 里**显式给了 `grid_indices`**，走的是
+# mapper 的优先级 1 直接透传，于是「源区解析」这条链路在验证套件里**从未被执行过**。
+# 真实 LLM 产出的 IR 恰恰不给 `grid_indices`，只给 `position: "landfill"` ——
+# 于是走上了那条会静默把点源展开成全网格 22454 格的死路（放大 170 倍），
+# 而全套验证依旧全绿。这条 Case 就是把这个缺口补上。
+#
+# 断言的是**写出来的 .rch**，不是中间对象：只有落盘文件才是用户真正跑的东西。
+# 用 build_simulation + write_simulation 即可，不必真跑 mf6（省几分钟）。
+# ══════════════════════════════════════════════════════════════════════════
+
+# 填埋场验收锁（East Texas 网格 103×218、delr=delc=20 m、原点来自 SHP 外框左下角）
+EXPECT_CELLS = 132
+EXPECT_ROWS = (52, 62)
+EXPECT_COLS = (137, 148)
+CELL_AREA_M2 = 20.0 * 20.0
+EXPECT_RECHARGE = EXPECT_CELLS * SRC_RATE * CELL_AREA_M2      # 5.28 m³/d
+
+
+def find_landfill_shp():
+    """
+    定位 landfill_arcs.shp。
+
+    上传目录是 `%TEMP%\\gm_zip_*`，重启后会被清理，所以这里按
+    「显式指定 → 仓库内 → 临时上传目录」的顺序找，并明确报告找的是哪一份。
+    """
+    env = os.environ.get("ET_SHP")
+    if env:
+        p = Path(env)
+        if p.exists():
+            return p
+        print(f"  !! ET_SHP 指向的文件不存在: {env}")
+
+    for p in sorted(Path(_ROOT).glob("data/uploads/**/landfill_arcs.shp")):
+        return p
+
+    tmp = os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp"
+    for p in sorted(Path(tmp).glob("gm_zip_*/landfill_arcs.shp")):
+        return p
+    return None
+
+
+def build_ir_case_d():
+    """
+    真实 IR（`data/sessions/default.json`）**原样**加载，只做两件事：
+      1. 补 `domain.origin_xy` —— 正常由 `file_parse_handler` 上传时写入，
+         这里离线跑，用 SHP 外框左下角显式补上；
+      2. 删掉 `geometry.grid_indices`（如果存在）—— 本 Case 要考的正是
+         「没有显式索引时能不能靠名称匹配找到源区」。
+
+    刻意**不**动那条 RCH 的 rate/concentration：如果它本身是错的，
+    Case D 就该红，而不是被我在这里悄悄改对。
+    """
+    raw = json.loads(IR_PATH.read_text(encoding="utf-8"))
+    ir = copy.deepcopy(raw.get("json_ir", raw))
+
+    ir.setdefault("domain", {})["origin_xy"] = [
+        float(os.environ.get("ET_ORIGIN_X", "612284.0")),
+        float(os.environ.get("ET_ORIGIN_Y", "3427412.0")),
+    ]
+    ir["stress_periods"] = {
+        "nper": NPER,
+        "period_data": [
+            {"perlen": PERLEN, "nstp": 1, "tsmult": 1.0} for _ in range(NPER)
+        ],
+    }
+
+    rch_bcs = [b for b in ir.get("boundary_conditions", []) if b.get("type") == "rch"]
+    for b in rch_bcs:
+        geo = b.get("geometry")
+        if isinstance(geo, dict):
+            for k in ("grid_indices", "resolved_from", "source_shp", "grid_signature"):
+                geo.pop(k, None)
+    return ir, rch_bcs
+
+
+def parse_rch_cells(text):
+    """
+    从写出的 .rch 文本里取出逐格记录：[(layer, row, col, rate, conc), ...]
+
+    **返回 0-based 索引**。MF6 输入文件的应力期数据块里 cellid 是 1-based
+    （layer 1 = 第一层），这里统一减 1，好让断言与 `tests/test_source_zone.py`
+    里那套 0-based 锁（row 52..62 / col 137..148）逐字对齐 —— 两个地方各用
+    一套基准是最容易被自己的 +1 骗过去的地方。
+    """
+    cells, on = [], False
+    for ln in text.splitlines():
+        t = ln.strip()
+        if not t or t.startswith("#"):
+            continue
+        low = t.lower()
+        if low.startswith("begin"):
+            on = "period" in low
+            continue
+        if low.startswith("end"):
+            on = False
+            continue
+        if not on:
+            continue
+        parts = t.split()
+        if len(parts) < 4:
+            continue
+        try:
+            lay, row, col, rate = int(parts[0]), int(parts[1]), int(parts[2]), float(parts[3])
+        except ValueError:
+            continue
+        conc = None
+        if len(parts) >= 5:
+            try:
+                conc = float(parts[4])
+            except ValueError:
+                conc = None
+        cells.append((lay - 1, row - 1, col - 1, rate, conc))
+    return cells
+
+
+def check_case_d(ws):
+    print("\n--- Case D 校验（SHP 名称匹配 → .rch 落盘）---")
+    ok = True
+
+    def _read(p):
+        f = ws / p
+        return f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+
+    rch_txt = _read("auto_model_d_gwf.rch")
+    if not rch_txt:
+        print(f"  [FAIL] 缺 {ws / 'auto_model_d_gwf.rch'}")
+        return False, [], set()
+
+    cells = parse_rch_cells(rch_txt)
+    n = len(cells)
+    print(f"  .rch 逐格记录数 = {n}")
+
+    # 1) 条数：必须是 132，不是 22454（= 103×218 全域）
+    if n == EXPECT_CELLS:
+        print(f"  [OK] .rch 恰好 {EXPECT_CELLS} 条（源区面积 {EXPECT_CELLS * CELL_AREA_M2:g} m²）")
+    else:
+        print(f"  [FAIL] .rch 记录数 = {n}，期望 {EXPECT_CELLS}")
+        if n == 103 * 218:
+            print("         ← 这是**全网格展开**（103×218），即本次修复要消灭的那个缺陷复发")
+        ok = False
+
+    if not cells:
+        return False, [], set()
+
+    # 2) 空间分布：必须集中在 row 52..62 × col 137..148，而不是铺满全域
+    rows = sorted({c[1] for c in cells})
+    cols = sorted({c[2] for c in cells})
+    if rows == list(range(EXPECT_ROWS[0], EXPECT_ROWS[1] + 1)):
+        print(f"  [OK] row 恰好 {EXPECT_ROWS[0]}..{EXPECT_ROWS[1]}")
+    else:
+        print(f"  [FAIL] row 范围 = {rows[0]}..{rows[-1]}（共 {len(rows)} 个），"
+              f"期望 {EXPECT_ROWS[0]}..{EXPECT_ROWS[1]}")
+        ok = False
+    if cols == list(range(EXPECT_COLS[0], EXPECT_COLS[1] + 1)):
+        print(f"  [OK] col 恰好 {EXPECT_COLS[0]}..{EXPECT_COLS[1]}")
+    else:
+        print(f"  [FAIL] col 范围 = {cols[0]}..{cols[-1]}（共 {len(cols)} 个），"
+              f"期望 {EXPECT_COLS[0]}..{EXPECT_COLS[1]}")
+        ok = False
+
+    # 3) 每格都在 layer 0（RCH 不接受跨层）
+    lays = {c[0] for c in cells}
+    if lays == {0}:
+        print("  [OK] 全部落在 layer 0")
+    else:
+        print(f"  [FAIL] 出现了 layer {sorted(lays)}，RCH 必须只用 layer 0"); ok = False
+
+    # 4) 速率与浓度：来自真实 IR 的 1e-4 m/d、20000 mg/L
+    rates = {round(c[3], 12) for c in cells}
+    concs = {round(c[4], 6) for c in cells if c[4] is not None}
+    if rates == {SRC_RATE}:
+        print(f"  [OK] rate 全为 {SRC_RATE:g} m/d")
+    else:
+        print(f"  [FAIL] rate 取值异常: {sorted(rates)}"); ok = False
+    if concs == {SRC_CONC}:
+        print(f"  [OK] concentration 全为 {SRC_CONC:g} mg/L")
+    elif not concs:
+        print("  [FAIL] .rch 没有浓度列 —— SSM 拿不到源项，浓度场会恒为 0"); ok = False
+    else:
+        print(f"  [FAIL] concentration 取值异常: {sorted(concs)}"); ok = False
+
+    # 5) 补给总量：这是最直观的"放大 170 倍"对照量（898.16 → 5.28 m³/d）
+    total = sum(c[3] * CELL_AREA_M2 for c in cells)
+    if abs(total - EXPECT_RECHARGE) < 1e-6:
+        print(f"  [OK] 总补给 = {total:.4f} m³/d（期望 {EXPECT_RECHARGE:.4f}）")
+    else:
+        print(f"  [FAIL] 总补给 = {total:.4f} m³/d，期望 {EXPECT_RECHARGE:.4f}"); ok = False
+
+    # 6) 不应再有全网格标量补给顶替（`RCH6 ... 1.0E-04` 那种裸标量）
+    if "CONSTANT" in rch_txt.upper() or "AUXILIARY" in rch_txt.upper():
+        print("  [OK] .rch 声明了 AUXILIARY CONCENTRATION")
+    else:
+        print("  [FAIL] .rch 缺 AUXILIARY CONCENTRATION"); ok = False
+
+    # 7) 落盘的源区集合，供羽流起点判据复用
+    src_cells = {(c[1], c[2]) for c in cells}
+    return ok, cells, src_cells
+
+
+def check_plume_origin(res, src_cells):
+    """
+    端到端（需真跑 mf6）：污染羽是否**从填埋场长出来**。
+
+    这是用户问题的最终判据 —— 参数对了、`.rch` 对了，但如果羽流仍不从源区长出来，
+    说明中间还有别的地方在丢源项。
+
+    刻意**不判"向北/向南迁移"**：仓库里存在两套互相矛盾的 row 方向约定
+    （`source_zone.infer_edge_indices` 认为 north→row 0，而 `grid_coords` 的
+    `grid_cell_centers` 让 row 索引随 y 增大、即 row 0 画在图的最下方）。
+    在索引空间里判"羽流格子 ⊂ 源区格子"与方向约定无关，是可靠的那一半；
+    方向问题见 docs/gwt_verification.md §5。
+    """
+    print("\n--- Case D 端到端：羽流起点 ---")
+    ok = True
+    gwt = res.get("gwt")
+    if gwt is None:
+        print("  [FAIL] 结果里没有 gwt"); return False
+
+    conc_obj = gwt.output.concentration()
+    times = [float(t) for t in np.atleast_1d(conc_obj.get_times())]
+    if not times:
+        print("  [FAIL] 没有浓度输出时刻"); return False
+
+    first = None
+    for t in times:
+        d = np.asarray(conc_obj.get_data(totim=t))
+        if d.ndim == 4:
+            d = d[-1]
+        a = np.asarray(d)[0]
+        if float(np.nanmax(a)) > 1.0:
+            first = (t, a)
+            break
+    if first is None:
+        print(f"  [FAIL] {len(times)} 帧里浓度始终 ≤1 mg/L，源项没进去"); return False
+
+    t0, a0 = first
+    rr, cc = np.nonzero(a0 > 1.0)
+    plume = set(zip(rr.tolist(), cc.tolist()))
+    inside = len(plume & src_cells)
+    print(f"  首个非空帧 t = {t0:g} d: 污染格 {len(plume)} 个，"
+          f"源区 {len(src_cells)} 格中有 {inside} 格已污染")
+
+    # 判据一：**源区必须整块都是热的**。这是"源项真的落在填埋场"最直接的证据
+    # —— 修复前是全网格毯子，那时源区当然是热的，但下面判据二会红。
+    if inside == len(src_cells):
+        print(f"  [OK] 源区 132 格全部已污染（源项确实从填埋场进入）")
+    else:
+        print(f"  [FAIL] 源区仅 {inside}/{len(src_cells)} 格污染 —— 源项没落在填埋场"); ok = False
+
+    # 判据二：污染区必须**整块连通到源区** —— 每一格污染都能沿相连格子追溯到
+    # 填埋场。这正是用户问题的答案（"污染物是不是从这个区域泄漏出来的"），
+    # 而且与 row/col 方向约定、与羽流往哪边迁移都无关。
+    #
+    # 不用"污染格 ⊂ 源区膨胀 K 格"那种矩形判据：羽流被水流带着走，是沿流向的
+    # 长条而不是等向薄壳，矩形会误报（实测 t=300 d 时源区正下方 row 67 有 32 格）。
+    seen, stack = set(src_cells & plume), list(src_cells & plume)
+    while stack:
+        r, c = stack.pop()
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                nb = (r + dr, c + dc)
+                if nb in plume and nb not in seen:
+                    seen.add(nb)
+                    stack.append(nb)
+    orphan = plume - seen
+    if not orphan:
+        print(f"  [OK] 污染区 {len(plume)} 格全部连通到源区（无孤立污染团）")
+    else:
+        print(f"  [FAIL] 有 {len(orphan)} 格污染与源区不连通，"
+              f"例如 {sorted(orphan)[:5]} —— 源项在别处也进来了"); ok = False
+
+    last = np.asarray(conc_obj.get_data(totim=times[-1]))
+    if last.ndim == 4:
+        last = last[-1]
+    aN = np.asarray(last)[0]
+    n_final = int((aN > 1.0).sum())
+    total = int(aN.size)
+    print(f"  末帧 t = {times[-1]:g} d: 污染格 {n_final} / {total}（{n_final / total * 100:.2f}%）")
+    if n_final < 0.25 * total:
+        print("  [OK] 污染羽是局部的，不是覆盖全域的毯子")
+    else:
+        print(f"  [FAIL] 污染羽覆盖 {n_final / total * 100:.1f}% 全域 —— 又变回毯子了"); ok = False
+
+    print(f"  ==> 羽流起点判据 {'通过' if ok else '未通过'}")
+    return ok
+
+
 def main():
+    which = (sys.argv[1] if len(sys.argv) > 1 else "C").upper()
+
+    if which == "D":
+        print("=" * 70)
+        print("Case D — SHP 名称匹配路径（污染源区回归锁）")
+        print("=" * 70)
+
+        shp = find_landfill_shp()
+        if shp is None:
+            print("  !! 找不到 landfill_arcs.shp。")
+            print("     上传目录是 %TEMP%\\gm_zip_*，重启即失效；")
+            print("     请用 ET_SHP=<路径> 指定，或重新上传基础资料 ZIP。")
+            return 2
+        print(f"  源区 SHP: {shp}")
+
+        ir, rch_bcs = build_ir_case_d()
+        if not rch_bcs:
+            print("  !! 真实 IR 里没有 rch 边界，Case D 无从考察"); return 2
+        for b in rch_bcs:
+            print(f"  待解析 BC: name={b.get('name')!r} "
+                  f"position={b.get('position')!r} "
+                  f"geometry={b.get('geometry')}")
+
+        # 先单独跑解析器，失败时能给出比「.rch 条数不对」精确得多的定位
+        from app.modeling.source_zone import materialize_source_zones
+        ir2 = copy.deepcopy(ir)
+        ir2, resolved, issues = materialize_source_zones(
+            ir2, uploaded_paths=[str(shp)]
+        )
+        if issues:
+            print("  !! 源区解析失败（这正是修复前会静默回落全网格的情形）:")
+            for name, msg in issues:
+                print(f"     · {name}: {msg}")
+            return 1
+        for name, out in resolved.items():
+            print(f"  解析结果 '{name}': {len(out['grid_indices'])} 格, "
+                  f"area={out['area_m2']:.1f} m², from={out['resolved_from']}")
+
+        out_dir = Path(os.environ.get("ET_WS_D")
+                       or (_ROOT / "data" / "outputs" / "gwt_verify" / "eastTexas_cased"))
+        builder = AutoModelBuilder(str(out_dir))
+
+        # ET_D_RUN=1 时真跑 mf6，额外判"羽流是否从填埋场长出来"（几分钟）
+        res_run = None
+        if os.environ.get("ET_D_RUN") == "1":
+            print("  ET_D_RUN=1 → 真跑 mf6（预计几分钟）...")
+            res_run = builder.build_and_run(ir2, "auto_model_d")
+            if not res_run.get("success"):
+                print("  !! 运行失败")
+                print(res_run.get("detail") or res_run.get("error"))
+                return 1
+            print(f"  运行成功，水头范围 {res_run.get('head_range')}")
+        else:
+            sim = builder.build_simulation(ir2, "auto_model_d")
+            sim.write_simulation(silent=True)
+
+        ok, cells, src_cells = check_case_d(out_dir / "auto_model_d")
+        if res_run is not None:
+            ok &= check_plume_origin(res_run, src_cells)
+
+        print("=" * 70)
+        print(f"Case D: {'通过' if ok else '未通过'}")
+        print("=" * 70)
+        return 0 if ok else 1
+
     print("=" * 70)
     print("Case C — East Texas（Gate 5）")
     print("=" * 70)
