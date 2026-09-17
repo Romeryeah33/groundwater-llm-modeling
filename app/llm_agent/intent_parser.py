@@ -605,15 +605,53 @@ class IntentParser:
             clean_bcs = []
             for bc in existing_bcs:
                 if isinstance(bc, dict):
-                    pos = bc.get("position", bc.get("name", ""))
+                    # 用 or 而不是 get 的默认值：position 键存在但为 None/"" 时
+                    # get 会直接返回 None，两边键取法不一致就配不上对
+                    pos = bc.get("position") or bc.get("name") or ""
                     if pos not in existing_positions:
                         existing_positions.add(pos)
                         clean_bcs.append(bc)
             for entry in boundary_entries:
-                pos = entry.get("position", entry.get("name", ""))
-                if pos not in existing_positions:
+                pos = entry.get("position") or entry.get("name") or ""
+
+                # 同位置的边界已存在 → **把新参数并进去**，不能把整条新条目丢掉。
+                # 丢掉会让"把北部定水头边界的水头改成 215m"这类
+                # "修改已有边界参数" 的请求永远落不到 IR 上：LLM 明明抽出了
+                # type/name/parameters，走到这里被静默丢弃，用户看到的却是
+                # missing_params 里那条参数一直挂着，怎么改都改不掉。
+                # 注意 _boundary_entry_* 键在上面的主循环里被 continue 跳过，
+                # 所以内层 parameters 只有这一条路径能写进 IR。
+                target = None
+                for bc in clean_bcs:
+                    if isinstance(bc, dict) and (
+                        (bc.get("position") or bc.get("name") or "") == pos
+                    ):
+                        target = bc
+                        break
+
+                if target is None:
                     existing_positions.add(pos)
                     clean_bcs.append(entry)
+                    continue
+
+                # 参数逐个合并：新值覆盖同名旧值
+                new_params = entry.get("parameters")
+                if isinstance(new_params, dict):
+                    params = target.setdefault("parameters", {})
+                    if isinstance(params, dict):
+                        for pname, pinfo in new_params.items():
+                            if pname in params:
+                                logger.info(f"边界 {pos} 的参数 {pname} 被改写为 {pinfo}")
+                            params[pname] = pinfo
+
+                # 其余字段只在缺失时补齐。type 等身份字段不在这里覆盖：
+                # LLM 对"改参数"这类请求给的 type 未必可靠，覆盖会静默换掉
+                # 边界类型（chd ↔ ghb），比丢掉参数更危险。
+                for k, v in entry.items():
+                    if k == "parameters":
+                        continue
+                    if k not in target or target[k] in (None, "", {}):
+                        target[k] = v
             ir["boundary_conditions"] = clean_bcs
 
         return ir
