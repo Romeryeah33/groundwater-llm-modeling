@@ -22,47 +22,30 @@ import matplotlib.ticker as ticker
 import matplotlib.font_manager as fm
 
 from app.utils.grid_coords import as_sizes, grid_cell_centers, warn_extent_mismatch
+from app.utils.palette import (
+    NPG_RED,
+    apply_mpl_style,
+    categorical,
+)
+from app.utils import palette as _palette
 
 logger = logging.getLogger(__name__)
 
-# ── CJK 中文字体配置 ──
-# Windows: 优先 SimHei（黑体）→ Microsoft YaHei → SimSun → 回退 DejaVu Sans
-_CJK_FONT_CANDIDATES = ["SimHei", "Microsoft YaHei", "SimSun", "WenQuanYi Micro Hei",
-                         "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC"]
-_available_cjk = None
-for _font_name in _CJK_FONT_CANDIDATES:
-    try:
-        fm.findfont(fm.FontProperties(family=_font_name), fallback_to_default=False)
-        _available_cjk = _font_name
-        break
-    except Exception:
-        continue
-
-if _available_cjk:
-    plt.rcParams["font.family"] = _available_cjk
-    logger.info(f"matplotlib CJK 字体已配置: {_available_cjk}")
-else:
-    logger.warning("未找到 CJK 字体，图表中文可能显示为方块。请安装中文字体。")
-
-# 全局样式设置
-plt.rcParams.update({
-    "figure.dpi": 150,
-    "savefig.dpi": 150,
-    "font.size": 10,
-    "axes.titlesize": 12,
-    "axes.labelsize": 11,
-    "axes.unicode_minus": False,  # 避免负号显示为方块
-})
+# ── 全局图件样式（字体栈 + 期刊版式）──
+# 具体取值与理由都在 app/utils/palette.py：那里同时是**界面**配色的唯一来源，
+# 使界面的靛蓝与图件的分类色出自同一套 NPG 色板。字体走 matplotlib ≥3.6 的
+# 逐字形回退（拉丁取 Arial、中文取雅黑），不再是"整张图统一用一个 CJK 字体"。
+_available_cjk = apply_mpl_style()
 
 
 class VisualizationEngine:
     """可视化引擎"""
 
-    # 推荐配色方案
-    CMAP_HEAD = "Blues"
-    CMAP_CONC = "YlOrRd"
-    CMAP_PLUME = "Reds"
-    CMAP_DIFF = "RdBu_r"
+    # 配色方案（取自 app/utils/palette.py，与界面同一套 NPG 色板）
+    CMAP_HEAD = _palette.CMAP_HEAD
+    CMAP_CONC = _palette.CMAP_CONC
+    CMAP_PLUME = _palette.CMAP_PLUME
+    CMAP_DIFF = _palette.CMAP_DIFF
 
     def __init__(self, output_dir: Optional[Path] = None):
         from app.config import settings
@@ -559,7 +542,7 @@ class VisualizationEngine:
         # 图例：阈值线（底图另在图例里标一笔，避免出现空图例）
         # 放到坐标轴**下方**而不是图内 —— 图内任何位置都会在某个时刻被污染羽
         # 盖住（用户反馈的"图例和图片重叠"就是这一类），挪出去才能保证永不遮挡。
-        handles = [plt.Line2D([], [], color="red", linestyle="--", linewidth=1.5,
+        handles = [plt.Line2D([], [], color=NPG_RED, linestyle="--", linewidth=1.5,
                               label=f"Threshold = {threshold:g} mg/L")]
         if basemap_loaded:
             handles.append(plt.Rectangle((0, 0), 1, 1, color="gray", alpha=0.4,
@@ -588,7 +571,7 @@ class VisualizationEngine:
         """穿透曲线（监测点浓度时间序列）"""
         fig, ax = plt.subplots(figsize=(8, 5))
 
-        colors = plt.cm.tab10(np.linspace(0, 1, len(concentrations)))
+        colors = categorical(len(concentrations))
         for (label, conc), color in zip(concentrations.items(), colors):
             ax.plot(times, conc, "-o", color=color, label=label,
                     markersize=4, linewidth=1.5)
@@ -626,7 +609,7 @@ class VisualizationEngine:
         processes = list(process_analysis.keys())
         contributions = list(process_analysis.values())
 
-        colors = plt.cm.Set2(np.linspace(0, 1, len(processes)))
+        colors = categorical(len(processes))
 
         # 饼图
         wedges, texts, autotexts = ax1.pie(
@@ -720,7 +703,7 @@ class VisualizationEngine:
                 fig.savefig(save_path, bbox_inches="tight", dpi=150)
             return fig
 
-        colors = plt.cm.Set2(np.linspace(0, 1, max(len(labels), 3)))
+        colors = categorical(max(len(labels), 3))
 
         ax1.pie(values, labels=labels, autopct="%1.1f%%",
                 colors=colors[:len(labels)], startangle=90, pctdistance=0.8)

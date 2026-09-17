@@ -43,6 +43,17 @@ from app.utils.ir_normalize import merge_time_sources
 from app.analysis.process_identifier import process_identifier
 from app.analysis.report_generator import ReportGenerator
 from app.visualization.plot_styler import plot_styler
+from app.frontend.theme import (
+    CSS_PATH,
+    build_head,
+    build_theme,
+    callout,
+    empty_state,
+    icon,
+    kpi_row,
+    panel_header,
+    telemetry,
+)
 
 import pandas as pd
 import copy
@@ -949,21 +960,23 @@ def _warning_card_html(val_result: dict) -> str:
         (low_priority if "跳过范围检查" in (i.get("description") or "")
          else important).append(i)
 
-    rows = "<br>".join(
-        f"· <b>{i.get('param_name', '?')}</b>: {i.get('description', '')}"
+    rows = "".join(
+        f"<div><b>{i.get('param_name', '?')}</b>：{i.get('description', '')}</div>"
         for i in important
     )
     if low_priority:
-        more = f"<br><span style='color:#8d6e00'>另有 {len(low_priority)} 条枚举/字符串类" \
-               f"参数未做范围检查的低优先提示（不影响建模）</span>"
+        more = (f'<div class="gw-note">另有 {len(low_priority)} 条枚举/字符串类参数'
+                f"未做范围检查的低优先提示（不影响建模）</div>")
     else:
         more = ""
-    return (
-        "<div style='margin-top:6px;padding:6px;background:#fff8e1;"
-        "border-left:3px solid #ffb300'>"
-        f"<b style='color:#8d6e00'>参数校验警告 {len(warns)} 条</b>"
-        f"{'（' + str(len(important)) + ' 条需留意）' if low_priority else ''}"
-        f"<br>{rows}{more}</div>"
+    # 配色交给 .gw-callout-warn（app/frontend/assets/gw_theme.css），不再写内联色值 ——
+    # 内联的 #fff8e1/#ffb300/#8d6e00 是界面里唯一一处"自成一套"的琥珀色，
+    # 与调色板里的 WARN_* 三档色不同源，换配色时会漏掉。
+    return callout(
+        "warn",
+        f"参数校验警告 {len(warns)} 条"
+        + (f"（{len(important)} 条需留意）" if low_priority else ""),
+        f"{rows}{more}",
     )
 
 
@@ -982,7 +995,7 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
     # 防御：确保 json_ir 是 dict
     if not isinstance(json_ir, dict):
         logger.error(f"run_model_handler 收到非dict的 json_ir: {type(json_ir).__name__}")
-        return empty_fig, f"<p style='color:red'>参数数据异常，请重新输入建模需求</p>", empty_fig, empty_fig, None, "# 参数数据异常", monitor.get_recent_logs(40)
+        return empty_fig, callout("err", "参数数据异常", "请重新输入建模需求"), empty_fig, empty_fig, None, "# 参数数据异常", monitor.get_recent_logs(40)
 
     if not json_ir or not json_ir.get("project", {}).get("name"):
         return empty_fig, "<p>请先在左侧对话区输入建模需求，完成参数补全后再开始建模</p>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
@@ -1008,7 +1021,7 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
         monitor.info(f"校验结果: valid={val_result.get('valid')}, errors={val_result.get('error_count')}, warnings={val_result.get('warning_count')}")
     except Exception as e:
         monitor.capture_error(e, "物理参数校验")
-        return empty_fig, f"<p style='color:red'>参数校验失败: {e}</p>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
+        return empty_fig, callout("err", "参数校验失败", f"{e}"), empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 
     if val_result["error_count"] > 0:
         issues = "\n".join(
@@ -1016,7 +1029,7 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
             for i in val_result["issues"] if i.get("severity") == "error"
         )
         monitor.warn(f"校验发现 {val_result['error_count']} 个错误")
-        return empty_fig, f"<p style='color:red'>参数校验发现 {val_result['error_count']} 个错误:</p><pre>{issues}</pre>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
+        return empty_fig, callout("err", f"参数校验发现 {val_result['error_count']} 个错误", f"<pre>{issues}</pre>"), empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 
     # 警告不阻断建模，但**必须可见**（此前只渲染错误，警告数只进 monitor 计数）
     warn_html = _warning_card_html(val_result)
@@ -1053,9 +1066,10 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
         detail = "\n\n".join(f"【{n}】\n{msg}" for n, msg in sz_issues)
         return (
             empty_fig,
-            "<p style='color:red'><b>源区定位失败，已阻止建模</b>"
-            "（避免把点源静默放大成全域面源，那正是污染羽看起来像水流模型结果的原因）:</p>"
-            f"<pre style='white-space:pre-wrap'>{detail}</pre>",
+            callout("err", "源区定位失败，已阻止建模",
+                    "<div>避免把点源静默放大成全域面源"
+                    "（那正是污染羽看起来像水流模型结果的原因）。</div>"
+                    f"<pre class='gw-pre-wrap'>{detail}</pre>"),
             empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40),
         )
 
@@ -1107,7 +1121,7 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
             error_msg = result.get('error', 'Unknown')
             monitor.error(f"模型运行失败: {error_msg}")
             logger.error(f"模型运行失败: {error_msg}")
-            return empty_fig, f"<p style='color:red'>模型运行失败: {error_msg}</p><p>请检查参数是否合理，或查看后台日志获取详情。</p>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
+            return empty_fig, callout("err", "模型运行失败", f"{error_msg}<br>请检查参数是否合理，或展开下方「流水线追踪」查看详情。"), empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
         gwf = result.get("gwf")
         gwt = result.get("gwt")
         rp = ResultProcessor()
@@ -1172,26 +1186,32 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
                 plot_styler.save_context(head=head, delr=delr, delc=delc,
                                          wells=json_ir.get("wells"), plot_type="head")
 
-                map_html = (
-                    f"<h3>Model Results</h3>"
-                    f"<b>Head Range:</b> {summary.get('head_min', 0):.2f} ~ {summary.get('head_max', 0):.2f} m<br>"
-                    f"<b>Water Balance Error:</b> {summary.get('water_balance_error', 0)*100:.4f}%<br>"
-                    f"<b>Total Inflow:</b> {summary.get('total_flow_in', 0):.2f} m3/d<br>"
-                    f"<b>Total Outflow:</b> {summary.get('total_flow_out', 0):.2f} m3/d<br>"
-                    # 配置时长与实际时长并排显示：两者不一致时用户当场就能看出来，
-                    # 不用等到读时间轴末刻才发现"怎么是 150000 天"
-                    f"<b>计划模拟时长（来自 IR）:</b> {_planned_duration_text(json_ir)}"
-                ) + warn_html
+                # 结构：指标块（一眼看数值）→ 遥测行（逐项核对）→ 状态提示块。
+                # 原先是 <h3>Model Results</h3> + 一串英文 <b>键:</b> 值<br>，
+                # 中文界面里夹英文标题，且五个量等权排列，水均衡误差这种"要不要
+                # 担心"的量混在里头不明显。等级（ok/warn/err）由阈值决定，颜色
+                # 只表状态，见 gw_theme.css 的 .gw-tel-*。
+                _wb_err = summary.get('water_balance_error', 0) * 100
+                _wb_tone = "ok" if abs(_wb_err) < 0.1 else ("warn" if abs(_wb_err) < 1.0 else "err")
+                _h_min = summary.get('head_min', 0)
+                _h_max = summary.get('head_max', 0)
+                map_html = kpi_row([
+                    ("水头范围", f"{_h_min:.2f} ~ {_h_max:.2f}", "m", "最小 ~ 最大"),
+                    ("水均衡误差", f"{_wb_err:.4f}", "%", "|误差| > 1% 需检查"),
+                    ("总补给", f"{summary.get('total_flow_in', 0):.2f}", "m³/d", "全部入流项之和"),
+                    ("总排泄", f"{summary.get('total_flow_out', 0):.2f}", "m³/d", "全部出流项之和"),
+                ])
+                # 配置时长与实际时长并排显示：两者不一致时用户当场就能看出来，
+                # 不用等到读时间轴末刻才发现"怎么是 150000 天"
+                map_html += telemetry([
+                    ("水均衡误差", f"{_wb_err:.4f} %", _wb_tone),
+                    ("计划模拟时长（来自 IR）", _planned_duration_text(json_ir), ""),
+                ]) + warn_html
                 # 源区那一行是用户能亲眼看到的"修复生效"证据：取代了旧代码
                 # 那句到不了任何 UI 组件的 logger.info
                 if source_zone_rows:
-                    map_html += (
-                        "<div style='margin-top:6px;padding:6px;background:#eef7ee;"
-                        "border-left:3px solid #4caf50'>"
-                        "<b style='color:#2e7d32'>源区定位</b><br>"
-                        + "<br>".join(source_zone_rows)
-                        + "</div>"
-                    )
+                    map_html += callout("ok", "源区定位",
+                                        "".join(f"<div>{r}</div>" for r in source_zone_rows))
 
                 if gwt:
                     try:
@@ -1255,7 +1275,7 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
                             reason = ("可用输出时刻少于 2 个" if len(frames) < 2
                                       else "流速场不可得（水头场或渗透系数缺失）")
                             logger.warning(f"主控过程分析跳过: {reason}")
-                            map_html += (f"<br><span style='color:orange'>"
+                            map_html += (f"<br><span class='gw-note-warn'>"
                                          f"主控过程分析未生成：{reason}</span>")
 
                         # ── 缓存供交互式重绘 ──
@@ -1283,7 +1303,7 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
             except Exception as e:
                 logger.error(f"结果提取失败: {e}")
                 logger.error(traceback.format_exc())
-                map_html = f"<p style='color:orange'>结果提取失败: {e}</p>"
+                map_html = callout("warn", "结果提取失败", f"{e}")
 
         # 图件落盘：必须在 plt.close("all") 之前，且报告要引用这些路径。
         # 文件名用 ASCII、显示名用中文 —— _add_figures 把 key 当段落标题、value 当路径。
@@ -1324,7 +1344,7 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
 
     except Exception as e:
         monitor.capture_error(e, "建模执行异常")
-        return empty_fig, f"<p style='color:red'>建模异常: {e}</p>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
+        return empty_fig, callout("err", "建模异常", f"{e}"), empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 def _generate_code_preview(result: dict, json_ir: dict, workspace) -> str:
     """从建模结果和 JSON IR 生成 FloPy 代码预览"""
     lines = ["# FloPy MODFLOW 6 自动生成代码",
@@ -1454,26 +1474,54 @@ def plot_modify_handler(nl_request: str, json_ir: dict):
 # UI
 # ================================================================
 
+def _hero_html() -> str:
+    """
+    顶部标题区。
+
+    取代原来那段「# 🌊 …」的 Markdown：标题层级、字体、间距、标签都交给
+    gw_theme.css 的 .gw-hero 控制，Markdown 的 h1/h3 字号在 Gradio 里是
+    按 .prose 排的，改不动也不够"产品化"。
+    中英并列 + 元信息细标签是科研工具的常见写法（术语中英混用是用户常态）。
+    """
+    tags = ["MF6 GWT", "FloPy", "物理约束校验", "MVP"]
+    tag_html = "".join(
+        f'<span class="gw-tag{" gw-tag-accent" if i == 0 else ""}">{t}</span>'
+        for i, t in enumerate(tags)
+    )
+    return (
+        '<div class="gw-hero">'
+        '<div class="gw-hero-top">'
+        f'<span class="gw-hero-mark">{icon("wave")}</span>'
+        "<h1>物理约束嵌入 LLM 的地下水智能建模系统"
+        '<span class="gw-hero-en">Physical-LLM Groundwater Modeling</span></h1>'
+        "</div>"
+        '<div class="gw-hero-sub">用自然语言描述建模需求，系统依次完成意图解析、'
+        "参数审查、物理约束校验、FloPy 建模、地下水流与溶质运移求解、成果出图与报告导出"
+        " —— 无需编写代码，也无需操作 GIS。</div>"
+        f'<div class="gw-hero-meta">{tag_html}</div>'
+        "</div>"
+    )
+
+
 def create_ui():
-    with gr.Blocks(title="Groundwater LLM Modeling") as demo:
+    with gr.Blocks(
+        title="物理约束嵌入 LLM 的地下水智能建模系统",
+    ) as demo:
         sid_state = gr.State("default")
 
-        gr.Markdown("""
-        # 🌊 Physical-LLM Groundwater Intelligent Modeling System
-        ### 物理约束嵌入LLM的地下水智能建模原型系统 (MVP)
-        通过自然语言描述即可完成地下水数值建模 — 无需编写代码、操作 GUI。
-        """)
+        gr.HTML(_hero_html())
 
         with gr.Row():
             with gr.Column(scale=4):
-                gr.Markdown("### 💬 建模对话")
-                chatbot = gr.Chatbot(label="对话记录", height=450)
-                msg = gr.Textbox(label="输入建模需求...",
+                gr.HTML(panel_header("建模对话", "Dialogue", "chat"))
+                chatbot = gr.Chatbot(label="对话记录", height=450,
+                                     elem_classes=["gw-chat"])
+                msg = gr.Textbox(label="输入建模需求",
                     placeholder="例如：模拟承压含水层1000×800m，渗透系数15m/d，西侧100m东侧95m定水头...",
                     lines=2)
                 with gr.Row():
                     send_btn = gr.Button("发送", variant="primary", scale=3)
-                    file_upload = gr.File(label="📎 上传文件", file_count="multiple",
+                    file_upload = gr.File(label="上传数据文件", file_count="multiple",
                         file_types=[".zip", ".shp", ".shx", ".dbf", ".prj", ".geojson", ".kml",
                                     ".xlsx", ".xls", ".csv", ".tif", ".tiff", ".asc",
                                     ".png", ".jpg", ".jpeg", ".bmp"])
@@ -1483,9 +1531,10 @@ def create_ui():
                     run_btn = gr.Button("开始建模", variant="primary", size="sm")
 
                 # ── 上传文件说明 ──
-                with gr.Accordion("📖 上传文件格式说明", open=False):
+                with gr.Accordion("支持的数据格式", open=False, elem_classes=["gw-acc"]):
+                    gr.HTML(panel_header("支持格式", "Supported Formats", "file"))
                     gr.Markdown("""
-### 📦 推荐方式：打包上传 ZIP 压缩包
+### 推荐方式：打包上传 ZIP 压缩包
 
 将所有建模需要的文件（SHP、CSV、Excel、GeoTIFF 等）统一打包为一个 `.zip` 文件上传，
 系统会自动解压并识别其中的数据文件。
@@ -1496,21 +1545,21 @@ def create_ui():
 
 | 格式 | 扩展名 | 建模用途 | 说明 |
 |------|--------|----------|------|
-| **ZIP 压缩包** | `.zip` | 📦 一键上传所有文件 | 推荐！将所有文件打包上传，系统自动识别 |
-| **Shapefile 面** | `.shp` + `.shx` + `.dbf` + `.prj` | 🗺️ 模型边界、参数分区 | GMS/QGIS/ArcGIS 导出时请确保 4 个配套文件齐全 |
-| **Shapefile 线** | `.shp` + `.shx` + `.dbf` + `.prj` | 🏞️ 河流弧段、GHB 边界 | 线要素会自动识别为河流/边界 |
-| **Shapefile 点** | `.shp` + `.shx` + `.dbf` + `.prj` | 🏭 井位、观测点 | 点要素自动识别为井位或观测点 |
-| **GeoJSON** | `.geojson` | 🗺️ 边界、要素 | 单一文件包含所有几何信息和属性 |
-| **KML/KMZ** | `.kml` | 🌍 Google Earth 导出 | 支持从 Google Earth 导入边界 |
-| **Excel** | `.xlsx`, `.xls` | 📊 井信息、调查点、地层 | 自动识别坐标列（x/y, 经度/纬度, E/N） |
-| **CSV** | `.csv` | 📋 时间序列、点位 | 纯文本表格，适合大量数据 |
-| **GeoTIFF** | `.tif`, `.tiff` | 🏔️ DEM 高程、参数分布、底图影像 | 含地理参考的栅格数据，会按真实地理坐标叠加 |
-| **图片底图** | `.png`, `.jpg`, `.jpeg`, `.bmp` | 🗺️ 底图影像 | 无地理参考，按模型范围或 SHP 外框铺放 |
-| **ASCII Grid** | `.asc` | 🏔️ 栅格数据 | ESRI ASCII 栅格格式 |
+| **ZIP 压缩包** | `.zip` | 一键上传所有文件 | 推荐：将所有文件打包上传，系统自动识别 |
+| **Shapefile 面** | `.shp` + `.shx` + `.dbf` + `.prj` | 模型边界、参数分区 | GMS/QGIS/ArcGIS 导出时请确保 4 个配套文件齐全 |
+| **Shapefile 线** | `.shp` + `.shx` + `.dbf` + `.prj` | 河流弧段、GHB 边界 | 线要素会自动识别为河流/边界 |
+| **Shapefile 点** | `.shp` + `.shx` + `.dbf` + `.prj` | 井位、观测点 | 点要素自动识别为井位或观测点 |
+| **GeoJSON** | `.geojson` | 边界、要素 | 单一文件包含所有几何信息和属性 |
+| **KML/KMZ** | `.kml` | Google Earth 导出 | 支持从 Google Earth 导入边界 |
+| **Excel** | `.xlsx`, `.xls` | 井信息、调查点、地层 | 自动识别坐标列（x/y, 经度/纬度, E/N） |
+| **CSV** | `.csv` | 时间序列、点位 | 纯文本表格，适合大量数据 |
+| **GeoTIFF** | `.tif`, `.tiff` | DEM 高程、参数分布、底图影像 | 含地理参考的栅格数据，按真实地理坐标叠加 |
+| **图片底图** | `.png`, `.jpg`, `.jpeg`, `.bmp` | 底图影像 | 无地理参考，按模型范围或 SHP 外框铺放 |
+| **ASCII Grid** | `.asc` | 栅格数据 | ESRI ASCII 栅格格式 |
 
 ---
 
-### ⚠️ 使用限制
+### 使用限制
 
 - **文件总大小**：建议 ≤ 100 MB（过大文件会导致上传超时）
 - **Shapefile 配套**：每个 `.shp` 必须附带同名的 `.shx`、`.dbf`、`.prj` 才能正确解析
@@ -1521,7 +1570,7 @@ def create_ui():
                     """)
 
             with gr.Column(scale=3):
-                gr.Markdown("### 📊 参数列表")
+                gr.HTML(panel_header("参数列表", "Parameters", "sliders"))
                 param_table = gr.Dataframe(
                     label="可编辑参数表（修改\"当前值\"列后点击下方按钮同步）",
                     value=build_param_table({}),
@@ -1530,30 +1579,33 @@ def create_ui():
                     column_count=5,
                     row_count=21,
                     interactive=True,
+                    elem_classes=["gw-params"],
                 )
-                param_transfer_btn = gr.Button("📥 参数传递", variant="primary", size="sm")
+                param_transfer_btn = gr.Button("参数传递", variant="primary", size="sm")
 
-                gr.Markdown("### 📋 参数审查")
-                param_panel = gr.JSON(label="JSON IR", value={}, height=200)
+                gr.HTML(panel_header("参数审查", "IR Inspector", "search"))
+                param_panel = gr.JSON(label="JSON IR", value={}, height=200,
+                                      elem_classes=["gw-tight"])
                 with gr.Row():
                     phase_text = gr.Textbox(label="会话阶段", value="intake", interactive=False)
                     missing_params = gr.HighlightedText(label="缺失参数", value=[],
                         color_map={"blocking": "red", "important": "orange", "optional": "green"})
-                gr.Markdown("### 💻 代码预览")
+                gr.HTML(panel_header("代码预览", "FloPy Script", "doc"))
                 code_preview = gr.Code(label="FloPy 建模代码", language="python", lines=12,
                     value="# 等待建模...\n# 完成建模后将在此处显示自动生成的 FloPy 代码")
 
-        gr.Markdown("---")
-        gr.Markdown("### 📊 建模结果")
+        gr.HTML(panel_header("运行摘要", "Results Workbench", "chart"))
         with gr.Tabs():
-            with gr.TabItem("📋 结果摘要"):
-                result_text = gr.HTML(value="<p>等待建模...</p>")
-            with gr.TabItem("💧 水头分布"):
-                head_plot = gr.Plot(label="水头等值线")
-            with gr.TabItem("☣️ 污染羽"):
-                gr.Markdown("#### 演化总览")
-                plume_plot = gr.Plot(label="污染羽演化总览")
-                gr.Markdown("#### 单时刻交互图")
+            with gr.TabItem("结果摘要"):
+                result_text = gr.HTML(value=empty_state(
+                    "尚未运行建模",
+                    "在左侧输入建模需求并点击「开始建模」，水均衡、源区定位与校验结论将在此汇总。"))
+            with gr.TabItem("水头分布"):
+                head_plot = gr.Plot(label="水头等值线", elem_classes=["gw-plot"])
+            with gr.TabItem("污染羽"):
+                gr.HTML(panel_header("演化总览", "Evolution Over Time", "grid"))
+                plume_plot = gr.Plot(label="污染羽演化总览", elem_classes=["gw-plot"])
+                gr.HTML(panel_header("单时刻交互图", "Single-time Plume", "drop"))
                 with gr.Row():
                     plume_time_slider = gr.Slider(
                         minimum=0, maximum=1, value=1, step=1,
@@ -1570,26 +1622,29 @@ def create_ui():
                     plume_vmax = gr.Number(
                         value=None, label="浓度上限 (mg/L)",
                         info="填好后点右侧「确定重绘」或按回车")
-                    plume_apply_btn = gr.Button("✅ 确定重绘", variant="primary",
+                    plume_apply_btn = gr.Button("确定重绘", variant="primary",
                                                 scale=0)
-                plume_single_plot = gr.Plot(label="污染羽单时刻")
+                plume_single_plot = gr.Plot(label="污染羽单时刻", elem_classes=["gw-plot"])
                 plume_status = gr.Markdown(
                     "完成建模后可在此选择时刻与浓度范围；"
                     "上下限输入框只在点「确定重绘」或按回车时才重绘。")
-            with gr.TabItem("📈 过程分析"):
-                process_plot = gr.Plot(label="主控过程贡献")
-            with gr.TabItem("🎨 图件修改"):
-                gr.Markdown("### 🎨 图件样式修改\n用自然语言描述您想要的图件修改，例如：")
-                gr.Markdown("> *\"把颜色改成蓝色系，加粗字体，等值线间隔设为2m\"*\n"
-                           "> *\"隐藏流向箭头，标题改为'承压含水层水头分布'\"*\n"
+            with gr.TabItem("过程分析"):
+                gr.HTML(panel_header("主控过程贡献", "Process Contribution", "beaker"))
+                process_plot = gr.Plot(label="主控过程贡献", elem_classes=["gw-plot"])
+            with gr.TabItem("图件修改"):
+                gr.HTML(panel_header("自然语言图件修饰", "Natural-language Styling", "image"))
+                gr.Markdown("用一句话描述想要的改动，系统会在当前图件上应用：\n\n"
+                           "> *\"把颜色改成蓝色系，等值线间隔设为 2 m\"*\n>\n"
+                           "> *\"隐藏流向箭头，标题改为「承压含水层水头分布」\"*\n>\n"
                            "> *\"井标记改成蓝色圆形，加大尺寸\"*")
                 plot_nl_input = gr.Textbox(
                     label="修改指令",
                     placeholder="例如：把颜色改成蓝色系，等值线间隔设为2米，标题字体改大",
                     lines=2)
-                plot_modify_btn = gr.Button("🎨 应用修改", variant="primary", size="sm")
+                plot_modify_btn = gr.Button("应用修改", variant="primary", size="sm")
                 plot_modify_msg = gr.Markdown("")
-            with gr.TabItem("📄 报告"):
+            with gr.TabItem("报告"):
+                gr.HTML(panel_header("报告章节", "Contents", "file"))
                 report_download = gr.File(label="下载报告")
 
         # === 事件绑定 ===
@@ -1622,13 +1677,14 @@ def create_ui():
         )
 
         # ---- 调试日志面板 ----
-        with gr.Accordion("🔍 调试日志 (点击展开)", open=False):
+        with gr.Accordion("流水线追踪 (debug log)", open=False, elem_classes=["gw-acc"]):
             debug_log = gr.Textbox(
                 label=f"实时管道追踪 — 完整日志: {monitor.get_log_file_path()}",
                 value="等待操作...",
                 lines=15,
                 max_lines=25,
                 interactive=False,
+                elem_classes=["gw-tight"],
             )
 
         # 按钮绑定（放在 debug_log 定义之后）
@@ -1670,20 +1726,41 @@ def create_ui():
             [head_plot, plot_modify_msg]
         )
 
-        gr.Markdown("""
-        ---
-        ### 💡 快速开始
-        > 我要开展一个项目名称为try的地下水流模拟工作，该模拟为单层非承压含水层的稳态模拟，模拟范围为东西0-1000m，南北0-800m的矩形范围，地层渗透系数15m/d，边界条件及初始条件为：西侧定水头100m，东侧定水头95m，南北侧为零流量边界。
-        """)
+        gr.HTML(panel_header("快速开始", "Quick Start", "play"))
+        gr.Markdown(
+            '把下面这段话原样粘进左侧对话框，即可跑通一条完整链路：\n\n'
+            '> 我要开展一个项目名称为 try 的地下水流模拟工作，该模拟为单层非承压含水层的稳态模拟，'
+            '模拟范围为东西 0-1000 m、南北 0-800 m 的矩形范围，地层渗透系数 15 m/d，'
+            '边界条件及初始条件为：西侧定水头 100 m，东侧定水头 95 m，南北侧为零流量边界。\n\n'
+            '若要模拟溶质运移，再补一句污染源的位置、浓度与模拟时长即可。'
+        )
 
     return demo
 
 
-if __name__ == "__main__":
-    demo = create_ui()
-    demo.launch(
+def launch_ui(demo=None, **overrides):
+    """
+    统一的启动入口（外观参数只在这里给一次）。
+
+    为什么不在 `create_ui()` 里写 theme/css_paths/head：**Gradio 6.0 起这三个参数
+    已从 `Blocks.__init__` 移到 `launch()`**。写进 `Blocks()` 只会得到一条
+    UserWarning 并被静默忽略 —— 实测那样构建出来的 demo：`demo.theme is None`、
+    `demo.css` 为空、`demo.head` 为空，界面退回默认外观，且**不报错**。
+    收成一个函数是为了让将来新增第二个启动点也自动带上样式。
+    """
+    demo = demo if demo is not None else create_ui()
+    kwargs = dict(
+        theme=build_theme(),
+        css_paths=[str(CSS_PATH)],
+        head=build_head(),
         server_name=os.getenv("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.getenv("GRADIO_PORT", "7860")),
         root_path=os.getenv("GRADIO_ROOT_PATH", ""),
         share=False,
     )
+    kwargs.update(overrides)
+    return demo.launch(**kwargs)
+
+
+if __name__ == "__main__":
+    launch_ui()

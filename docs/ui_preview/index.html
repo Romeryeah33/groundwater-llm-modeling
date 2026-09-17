@@ -1,0 +1,1372 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-accent="teal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>界面美化预览 · 物理约束嵌入LLM的地下水智能建模系统</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   设计令牌
+   两套明暗 × 三套主色，全部走 CSS 变量；落地时同一套变量
+   直接写进 Gradio 的 css= 参数
+   ============================================================ */
+:root{
+  --font-ui:"Inter","Noto Sans SC",system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono",monospace;
+
+  --r-xs:3px; --r-sm:4px; --r-md:6px; --r-lg:8px;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:24px;
+
+  --ok:#2F7A55; --ok-soft:rgba(47,122,85,.10);
+  --warn:#9A6B12; --warn-soft:rgba(154,107,18,.11);
+  --err:#A33A38; --err-soft:rgba(163,58,56,.10);
+  --info:#3A5F9E; --info-soft:rgba(58,95,158,.10);
+  --con-mid:#2A788E; --con-low:#2C3E7B; --con-high:#7EBB34; --con-top:#DCE319;
+}
+html[data-accent="teal"]{
+  --accent:#0E7C86; --accent-ink:#0A5C64; --accent-soft:rgba(14,124,134,.09);
+  --accent-line:rgba(14,124,134,.28); --accent-glow:rgba(14,124,134,.18);
+}
+html[data-accent="indigo"]{
+  --accent:#3550A8; --accent-ink:#2A4189; --accent-soft:rgba(53,80,168,.09);
+  --accent-line:rgba(53,80,168,.28); --accent-glow:rgba(53,80,168,.18);
+}
+html[data-accent="graphite"]{
+  --accent:#4A5568; --accent-ink:#333C4A; --accent-soft:rgba(74,85,104,.10);
+  --accent-line:rgba(74,85,104,.30); --accent-glow:rgba(74,85,104,.18);
+}
+html[data-theme="light"]{
+  --bg:#F4F5F7; --bg-grad:radial-gradient(1200px 600px at 12% -10%,rgba(14,124,134,.05),transparent 60%);
+  --panel:#FFFFFF; --panel-2:#FAFBFC; --panel-3:#F1F3F5; --panel-hd:#FCFCFD;
+  --ink:#131820; --ink-2s:#4A5462; --ink-3:#7B8595; --ink-4:#98A1AF;
+  --line:rgba(16,24,40,.11); --line-2:rgba(16,24,40,.06); --line-3:rgba(16,24,40,.035);
+  --console:#0E1319; --console-ink:#C6D0DC; --console-dim:#6B7887;
+  --map-bg:#FFFFFF; --map-grid:rgba(16,24,40,.055); --map-axis:rgba(16,24,40,.22);
+  --hover:rgba(16,24,40,.035); --sel:rgba(16,24,40,.05);
+  --shadow-1:0 1px 2px rgba(16,24,40,.04);
+  --shadow-2:0 4px 14px -6px rgba(16,24,40,.18);
+  --scroll:rgba(16,24,40,.16);
+}
+html[data-theme="dark"]{
+  --bg:#0B0E13; --bg-grad:radial-gradient(1200px 600px at 12% -10%,rgba(14,124,134,.09),transparent 60%);
+  --panel:#12161D; --panel-2:#161B23; --panel-3:#1B212A; --panel-hd:#141920;
+  --ink:#E4E9F0; --ink-2s:#A8B2C0; --ink-3:#7A8494; --ink-4:#5C6674;
+  --line:rgba(255,255,255,.10); --line-2:rgba(255,255,255,.06); --line-3:rgba(255,255,255,.035);
+  --console:#080B10; --console-ink:#C6D0DC; --console-dim:#5E6B7A;
+  --map-bg:#161B23; --map-grid:rgba(255,255,255,.05); --map-axis:rgba(255,255,255,.22);
+  --hover:rgba(255,255,255,.04); --sel:rgba(255,255,255,.06);
+  --shadow-1:0 1px 2px rgba(0,0,0,.4);
+  --shadow-2:0 6px 18px -8px rgba(0,0,0,.6);
+  --scroll:rgba(255,255,255,.16);
+  --ok:#5FB98A; --ok-soft:rgba(95,185,138,.12);
+  --warn:#D6A544; --warn-soft:rgba(214,165,68,.13);
+  --err:#D9736F; --err-soft:rgba(217,115,111,.13);
+  --info:#7C9DE0; --info-soft:rgba(124,157,224,.13);
+  --accent:#3FA9B3; --accent-ink:#6FC6CE; --accent-soft:rgba(63,169,179,.13);
+  --accent-line:rgba(63,169,179,.35); --accent-glow:rgba(63,169,179,.22);
+}
+html[data-theme="dark"][data-accent="indigo"]{
+  --accent:#7C93E8; --accent-ink:#A4B6F2; --accent-soft:rgba(124,147,232,.14);
+  --accent-line:rgba(124,147,232,.36); --accent-glow:rgba(124,147,232,.22);
+}
+html[data-theme="dark"][data-accent="graphite"]{
+  --accent:#9AA7B8; --accent-ink:#C2CCDA; --accent-soft:rgba(154,167,184,.13);
+  --accent-line:rgba(154,167,184,.34); --accent-glow:rgba(154,167,184,.20);
+}
+
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);background-image:var(--bg-grad);background-attachment:fixed;
+  color:var(--ink);font-family:var(--font-ui);font-size:13.5px;line-height:1.5;
+  font-feature-settings:"tnum" 1,"cv05" 1;-webkit-font-smoothing:antialiased;
+}
+::selection{background:var(--accent-glow)}
+*::-webkit-scrollbar{width:10px;height:10px}
+*::-webkit-scrollbar-thumb{background:var(--scroll);border-radius:8px;border:3px solid transparent;background-clip:content-box}
+*::-webkit-scrollbar-track{background:transparent}
+svg.ic{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none}
+svg.ic.sm{width:13px;height:13px}
+svg.ic.fill{fill:currentColor;stroke:none}
+.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+
+/* ============ 预览工具条（不属于设计本身） ============ */
+.preview-bar{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:9px 18px;border-bottom:1px dashed var(--accent-line);
+  background:var(--accent-soft);font-size:12px;color:var(--ink-2s);
+}
+.preview-bar .tag{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  padding:2px 7px;border:1px solid var(--accent-line);border-radius:var(--r-xs);color:var(--accent-ink);
+}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:var(--r-sm);overflow:hidden;background:var(--panel)}
+.seg button{
+  appearance:none;border:0;background:transparent;color:var(--ink-3);cursor:pointer;
+  font:inherit;font-size:12px;padding:4px 11px;border-right:1px solid var(--line-2);
+}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed="true"]{background:var(--accent);color:#fff}
+html[data-theme="dark"] .seg button[aria-pressed="true"]{color:#0B0E13}
+
+/* ============ 顶栏 ============ */
+.appbar{
+  position:sticky;top:0;z-index:40;
+  display:flex;align-items:center;gap:16px;
+  padding:12px 18px;background:color-mix(in srgb,var(--panel) 88%,transparent);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--line);
+}
+.brand{display:flex;align-items:center;gap:11px;min-width:0}
+.brand-mark{
+  width:34px;height:34px;border-radius:var(--r-md);flex:none;
+  background:linear-gradient(150deg,var(--accent),color-mix(in srgb,var(--accent) 55%,#0B0E13));
+  display:grid;place-items:center;box-shadow:var(--shadow-1);
+}
+.brand-mark svg{width:19px;height:19px;stroke:#fff;stroke-width:1.7;fill:none}
+.brand-txt{min-width:0}
+.brand-zh{font-size:14.5px;font-weight:600;letter-spacing:.01em;white-space:nowrap}
+.brand-en{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--ink-3);margin-top:1px;white-space:nowrap;
+}
+.appbar-spacer{flex:1}
+.chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.chip{
+  font-family:var(--font-mono);font-size:10.5px;letter-spacing:.02em;
+  padding:3px 8px;border:1px solid var(--line);border-radius:var(--r-xs);
+  background:var(--panel-2);color:var(--ink-2s);display:inline-flex;align-items:center;gap:5px;
+}
+.chip.accent{border-color:var(--accent-line);color:var(--accent-ink);background:var(--accent-soft)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
+.dot.pulse{box-shadow:0 0 0 3px var(--ok-soft)}
+
+/* ============ 布局 ============ */
+.shell{max-width:1760px;margin:0 auto;padding:var(--sp-4) 18px 64px}
+.workbench{display:grid;grid-template-columns:minmax(0,1.42fr) minmax(0,1fr);gap:var(--sp-4);align-items:start}
+.stack{display:flex;flex-direction:column;gap:var(--sp-4);min-width:0}
+
+/* ============ 面板 ============ */
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-1);overflow:hidden}
+.panel-hd{
+  display:flex;align-items:center;gap:8px;padding:9px 12px;
+  background:var(--panel-hd);border-bottom:1px solid var(--line-2);color:var(--ink-2s);
+}
+.panel-hd .hd-zh{font-size:12.5px;font-weight:600;color:var(--ink);letter-spacing:.01em}
+.panel-hd .hd-en{
+  font-family:var(--font-mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-4);
+}
+.panel-hd .hd-rule{flex:1;height:1px;background:var(--line-3)}
+.panel-hd .hd-act{display:flex;align-items:center;gap:6px}
+.panel-bd{padding:12px}
+.panel-bd.tight{padding:0}
+.panel-ft{padding:8px 12px;border-top:1px solid var(--line-2);background:var(--panel-2);display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--ink-3)}
+
+/* ============ 按钮 ============ */
+.btn{
+  appearance:none;font:inherit;font-size:12.5px;font-weight:500;cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  padding:6px 12px;border-radius:var(--r-sm);border:1px solid var(--line);
+  background:var(--panel);color:var(--ink-2s);transition:background .12s,border-color .12s,color .12s;
+  white-space:nowrap;
+}
+.btn:hover{background:var(--hover);border-color:var(--line)}
+.btn.sm{padding:4px 9px;font-size:12px}
+.btn.primary{
+  background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;
+  box-shadow:0 1px 2px var(--accent-glow);
+}
+html[data-theme="dark"] .btn.primary{color:#0B0E13}
+.btn.primary:hover{background:var(--accent-ink);border-color:var(--accent-ink)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--ink-3)}
+.btn.ghost:hover{background:var(--hover);color:var(--ink-2s)}
+.btn.icon{padding:5px;width:28px;height:28px}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+/* ============ 表单控件 ============ */
+.field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.field-lb{
+  font-family:var(--font-mono);font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--ink-4);display:flex;align-items:center;justify-content:space-between;gap:6px;
+}
+.field-lb .unit{color:var(--ink-4);text-transform:none;letter-spacing:.02em}
+.input,.textarea{
+  width:100%;font:inherit;font-size:12.5px;color:var(--ink);background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--r-sm);padding:6px 9px;outline:none;
+}
+.textarea{resize:vertical;min-height:52px;font-size:13px;line-height:1.5}
+.input:focus,.textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.input.mono{font-family:var(--font-mono);font-size:12px}
+.input::placeholder,.textarea::placeholder{color:var(--ink-4)}
+.mini-note{font-size:11px;color:var(--ink-4)}
+
+/* ============ 对话 ============ */
+.chat{display:flex;flex-direction:column}
+.chat-log{display:flex;flex-direction:column;max-height:392px;overflow-y:auto;padding:2px 12px 4px}
+.msg{display:grid;grid-template-columns:62px 1fr;gap:10px;padding:11px 0;border-bottom:1px solid var(--line-3)}
+.msg:last-child{border-bottom:0}
+.msg-role{
+  font-family:var(--font-mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-4);padding-top:2px;
+}
+.msg.user .msg-role{color:var(--ink-3)}
+.msg-body{min-width:0;font-size:13px;color:var(--ink-2s)}
+.msg-body strong{color:var(--ink);font-weight:600}
+.msg.user .msg-body{color:var(--ink)}
+.msg-time{font-family:var(--font-mono);font-size:10px;color:var(--ink-4);margin-left:6px;letter-spacing:0}
+
+/* 结构化卡片：IR 抽取结果 */
+.kv-card{margin-top:9px;border:1px solid var(--line-2);border-radius:var(--r-sm);background:var(--panel-2);overflow:hidden}
+.kv-hd{
+  display:flex;align-items:center;gap:7px;padding:5px 9px;border-bottom:1px solid var(--line-3);
+  font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);
+}
+.kv-row{display:grid;grid-template-columns:132px 1fr;gap:10px;padding:4px 9px;font-size:12px;border-bottom:1px solid var(--line-3)}
+.kv-row:last-child{border-bottom:0}
+.kv-k{color:var(--ink-4);font-family:var(--font-mono);font-size:11px}
+.kv-v{color:var(--ink);font-family:var(--font-mono);font-size:11.5px;word-break:break-all}
+.kv-v .ok{color:var(--ok)}
+.kv-v .dim{color:var(--ink-3)}
+.callout{
+  display:flex;gap:8px;align-items:flex-start;margin-top:9px;padding:8px 10px;
+  border:1px solid var(--accent-line);border-left:2.5px solid var(--accent);
+  border-radius:0 var(--r-sm) var(--r-sm) 0;background:var(--accent-soft);font-size:12px;color:var(--ink-2s);
+}
+.callout.warn{border-color:rgba(154,107,18,.3);border-left-color:var(--warn);background:var(--warn-soft)}
+.callout .callout-hd{font-family:var(--font-mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--warn);margin-bottom:2px}
+
+/* 输入区 */
+.composer{border-top:1px solid var(--line-2);padding:10px 12px;background:var(--panel-2)}
+.composer-row{display:flex;gap:8px;align-items:flex-end;margin-top:8px}
+.composer-row .grow{flex:1}
+.dropzone{
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  border:1px dashed var(--line);border-radius:var(--r-sm);background:var(--panel);
+  padding:8px 10px;font-size:12px;color:var(--ink-3);cursor:pointer;transition:border-color .12s,background .12s;
+}
+.dropzone:hover{border-color:var(--accent-line);background:var(--accent-soft);color:var(--accent-ink)}
+.actions{display:flex;align-items:center;gap:8px;margin-top:8px}
+.actions .spacer{flex:1}
+
+/* ============ 参数表 ============ */
+.ptable{width:100%;border-collapse:collapse;font-size:12.5px}
+.ptable th{
+  text-align:left;font-family:var(--font-mono);font-size:9.5px;font-weight:500;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--ink-4);padding:7px 12px;border-bottom:1px solid var(--line);
+  background:var(--panel-hd);position:sticky;top:0;
+}
+.ptable td{padding:6px 12px;border-bottom:1px solid var(--line-3);vertical-align:middle}
+.ptable tr:hover td{background:var(--hover)}
+.ptable .k{font-family:var(--font-mono);font-size:11.5px;color:var(--ink);white-space:nowrap}
+.ptable .k em{font-style:normal;color:var(--ink-4);display:block;font-family:var(--font-ui);font-size:11px}
+.ptable .v{font-family:var(--font-mono);font-size:12px;text-align:right;font-variant-numeric:tabular-nums;color:var(--ink)}
+.ptable .u{font-family:var(--font-mono);font-size:11px;color:var(--ink-4);white-space:nowrap}
+.tagp{
+  font-family:var(--font-mono);font-size:9.5px;letter-spacing:.06em;padding:1.5px 6px;border-radius:var(--r-xs);
+  border:1px solid var(--line);color:var(--ink-3);white-space:nowrap;
+}
+.tagp.req{border-color:var(--err);color:var(--err);background:var(--err-soft)}
+.tagp.imp{border-color:rgba(154,107,18,.4);color:var(--warn);background:var(--warn-soft)}
+.tagp.opt{color:var(--ink-4)}
+.st{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--ink-3);white-space:nowrap}
+.st .dot{width:5px;height:5px}
+.st.ok .dot{background:var(--ok)} .st.warn .dot{background:var(--warn)} .st.dim .dot{background:var(--ink-4)}
+
+/* ============ IR / 代码 ============ */
+.code{
+  font-family:var(--font-mono);font-size:11.5px;line-height:1.62;margin:0;padding:11px 12px;
+  background:var(--panel-2);overflow:auto;max-height:240px;color:var(--ink-2s);
+  border-radius:0 0 var(--r-md) var(--r-md);
+}
+.code .s{color:var(--ok)} .code .n{color:var(--accent-ink)} .code .b{color:var(--info)}
+.code .c{color:var(--ink-4)} .code .p{color:var(--warn)}
+.code .k{color:var(--ink)}
+.tok-strip{display:flex;flex-wrap:wrap;gap:5px}
+.tok{
+  font-family:var(--font-mono);font-size:10.5px;padding:2px 7px;border-radius:var(--r-xs);
+  border:1px solid var(--line);color:var(--ink-3);background:var(--panel);
+}
+.tok.blocking{border-color:var(--err);color:var(--err);background:var(--err-soft)}
+.tok.important{border-color:rgba(154,107,18,.4);color:var(--warn);background:var(--warn-soft)}
+.tok.optional{border-color:var(--ok);color:var(--ok);background:var(--ok-soft)}
+
+/* ============ 结果区 ============ */
+.results-hd{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:26px 0 10px}
+.results-hd h2{margin:0;font-size:16px;font-weight:600;letter-spacing:.01em}
+.results-hd .hd-en{font-family:var(--font-mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-4)}
+.pipeline{display:flex;align-items:center;gap:0;margin-left:auto;flex-wrap:wrap}
+.step{display:flex;align-items:center;gap:6px;padding:0 11px;font-size:11.5px;color:var(--ink-3);white-space:nowrap}
+.step:first-child{padding-left:0}
+.step .n{font-family:var(--font-mono);font-size:10px;color:var(--ink-4)}
+.step.done{color:var(--ink-2s)}
+.step.done svg{color:var(--ok)}
+.step-sep{width:22px;height:1px;background:var(--line);flex:none}
+
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);padding:0 2px;overflow-x:auto}
+.tab{
+  appearance:none;border:0;background:transparent;font:inherit;font-size:12.5px;cursor:pointer;
+  color:var(--ink-3);padding:9px 13px;border-bottom:2px solid transparent;margin-bottom:-1px;
+  display:inline-flex;align-items:center;gap:7px;white-space:nowrap;
+}
+.tab:hover{color:var(--ink-2s);background:var(--hover)}
+.tab[aria-selected="true"]{color:var(--accent-ink);border-bottom-color:var(--accent);font-weight:600}
+.tab .cnt{font-family:var(--font-mono);font-size:10px;color:var(--ink-4)}
+.tabpanel{display:none;padding-top:var(--sp-4)}
+.tabpanel[data-active="true"]{display:block}
+
+/* KPI */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:var(--sp-3)}
+.kpi{border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;background:var(--panel)}
+.kpi-lb{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--ink-4)}
+.kpi-val{font-family:var(--font-mono);font-size:19px;font-weight:500;margin-top:4px;letter-spacing:-.01em;color:var(--ink)}
+.kpi-val small{font-size:11px;color:var(--ink-3);font-weight:400;margin-left:3px}
+.kpi-hint{font-size:11px;color:var(--ink-4);margin-top:3px}
+.kpi-hint.ok{color:var(--ok)}
+
+/* 图件 */
+.fig{margin:0;border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel);overflow:hidden}
+.fig-hd{
+  display:flex;align-items:center;gap:8px;padding:7px 11px;border-bottom:1px solid var(--line-2);
+  background:var(--panel-hd);
+}
+.fig-cap{font-size:12px;font-weight:600;color:var(--ink)}
+.fig-sub{font-family:var(--font-mono);font-size:10px;color:var(--ink-4);margin-left:auto}
+.fig svg{display:block;width:100%;height:auto}
+.fig-ft{
+  padding:7px 11px;border-top:1px solid var(--line-2);background:var(--panel-2);
+  font-family:var(--font-mono);font-size:11px;color:var(--ink-3);display:flex;gap:14px;flex-wrap:wrap;
+}
+.fig-ft .ok{color:var(--ok)}
+.telemetry{
+  font-family:var(--font-mono);font-size:11.5px;color:var(--ink-2s);
+  display:flex;gap:16px;flex-wrap:wrap;align-items:center;
+}
+.telemetry b{color:var(--ink);font-weight:500}
+
+/* 单时刻控制条（仪表盘式） */
+.inststrip{display:grid;grid-template-columns:minmax(0,2.1fr) 108px auto auto auto;gap:var(--sp-3);align-items:end}
+input[type=range]{
+  -webkit-appearance:none;appearance:none;width:100%;height:22px;background:transparent;cursor:pointer;margin:0;
+}
+input[type=range]::-webkit-slider-runnable-track{height:3px;background:linear-gradient(90deg,var(--accent) var(--pct,60%),var(--line) var(--pct,60%));border-radius:2px}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:13px;height:13px;border-radius:50%;background:var(--panel);
+  border:2px solid var(--accent);margin-top:-5px;box-shadow:0 1px 3px rgba(0,0,0,.2);
+}
+input[type=range]:focus-visible{outline:none}
+input[type=range]:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px var(--accent-glow)}
+.tickbar{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:9.5px;color:var(--ink-4);margin-top:-2px}
+.switch{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2s);cursor:pointer;user-select:none}
+.switch input{position:absolute;opacity:0;pointer-events:none}
+.switch .track{width:30px;height:16px;border-radius:9px;background:var(--line);position:relative;transition:background .15s;flex:none}
+.switch .track::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--panel);transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.switch input:checked + .track{background:var(--accent)}
+.switch input:checked + .track::after{transform:translateX(14px)}
+.switch input:focus-visible + .track{box-shadow:0 0 0 3px var(--accent-soft)}
+
+/* 小倍数图 */
+.multiples{display:grid;grid-template-columns:repeat(auto-fit,minmax(184px,1fr));gap:var(--sp-3)}
+.multi{border:1px solid var(--line);border-radius:var(--r-sm);background:var(--panel);overflow:hidden}
+.multi-hd{
+  display:flex;justify-content:space-between;align-items:baseline;padding:6px 9px 0;
+  font-family:var(--font-mono);font-size:10.5px;color:var(--ink-3);
+}
+.multi-hd b{color:var(--ink);font-weight:500}
+.multi svg{display:block;width:100%;height:auto}
+
+/* 过程贡献条 */
+.bars{display:flex;flex-direction:column;gap:10px}
+.bar-row{display:grid;grid-template-columns:118px 1fr 62px;gap:12px;align-items:center;font-size:12.5px}
+.bar-lb{color:var(--ink-2s);display:flex;align-items:center;gap:6px}
+.bar-track{height:7px;background:var(--panel-3);border-radius:4px;overflow:hidden}
+.bar-fill{height:100%;background:var(--accent);border-radius:4px}
+.bar-fill.d2{background:color-mix(in srgb,var(--accent) 66%,var(--panel-3))}
+.bar-fill.d3{background:color-mix(in srgb,var(--accent) 42%,var(--panel-3))}
+.bar-fill.d4{background:color-mix(in srgb,var(--accent) 26%,var(--panel-3))}
+.bar-v{font-family:var(--font-mono);font-size:11.5px;text-align:right;color:var(--ink-2s)}
+
+/* 表格型列表 */
+.dlist{width:100%;border-collapse:collapse;font-size:12.5px}
+.dlist td{padding:7px 12px;border-bottom:1px solid var(--line-3)}
+.dlist tr:last-child td{border-bottom:0}
+.dlist .k{font-family:var(--font-mono);font-size:11.5px;color:var(--ink-3);width:auto;white-space:nowrap}
+.dlist .v{font-family:var(--font-mono);text-align:right;color:var(--ink)}
+.dlist .d{color:var(--ink-4);font-size:11.5px;text-align:right;white-space:nowrap}
+
+/* 报告卡 */
+.filecard{display:flex;align-items:center;gap:11px;padding:11px 12px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--panel)}
+.filecard .fi{
+  width:34px;height:34px;border-radius:var(--r-sm);display:grid;place-items:center;flex:none;
+  background:var(--accent-soft);color:var(--accent-ink);border:1px solid var(--accent-line);
+}
+.filecard .fn{font-size:13px;font-weight:500}
+.filecard .fm{font-family:var(--font-mono);font-size:10.5px;color:var(--ink-4);margin-top:2px}
+
+/* 折叠面板 */
+.acc{border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel);overflow:hidden}
+.acc-hd{
+  width:100%;display:flex;align-items:center;gap:9px;padding:9px 12px;border:0;background:var(--panel-hd);
+  font:inherit;font-size:12.5px;font-weight:600;color:var(--ink);cursor:pointer;text-align:left;
+}
+.acc-hd:hover{background:var(--hover)}
+.acc-hd .hd-en{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-4);font-weight:400}
+.acc-hd .chev{margin-left:auto;transition:transform .16s;color:var(--ink-3)}
+.acc[data-open="true"] .acc-hd .chev{transform:rotate(180deg)}
+.acc-bd{display:none;border-top:1px solid var(--line-2)}
+.acc[data-open="true"] .acc-bd{display:block}
+
+/* 控制台 */
+.console{background:var(--console);color:var(--console-ink);font-family:var(--font-mono);font-size:11.5px;line-height:1.72;padding:10px 12px;max-height:230px;overflow:auto}
+.console .ln{display:flex;gap:10px;white-space:pre}
+.console .ts{color:var(--console-dim);flex:none}
+.console .lv{flex:none;width:44px}
+.console .lv.info{color:#7C9DE0} .console .lv.ok{color:#5FB98A} .console .lv.warn{color:#D6A544} .console .lv.err{color:#D9736F}
+.console .msg{color:var(--console-ink)}
+.console .msg .dim{color:var(--console-dim)}
+
+/* 文件格式说明表 */
+.fmttable{width:100%;border-collapse:collapse;font-size:12px}
+.fmttable th{
+  text-align:left;font-family:var(--font-mono);font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--ink-4);font-weight:500;padding:7px 12px;border-bottom:1px solid var(--line);background:var(--panel-hd);
+}
+.fmttable td{padding:6px 12px;border-bottom:1px solid var(--line-3);vertical-align:top;color:var(--ink-2s)}
+.fmttable td:first-child{font-weight:500;color:var(--ink);white-space:nowrap}
+.fmttable code{font-family:var(--font-mono);font-size:11px;color:var(--accent-ink);background:var(--accent-soft);padding:1px 5px;border-radius:var(--r-xs)}
+.fmttable tr:last-child td{border-bottom:0}
+
+/* 快速开始 */
+.quick{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:12px}
+.quick .num{
+  width:22px;height:22px;border-radius:50%;border:1px solid var(--accent-line);color:var(--accent-ink);
+  display:grid;place-items:center;font-family:var(--font-mono);font-size:11px;flex:none;
+}
+
+/* 设计说明 */
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:var(--sp-3)}
+.note{border:1px solid var(--line);border-radius:var(--r-sm);padding:12px;background:var(--panel)}
+.note h4{margin:0 0 7px;font-size:12.5px;display:flex;align-items:center;gap:7px}
+.note h4 .hd-en{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);font-weight:400}
+.note ul{margin:0;padding-left:16px;font-size:12px;color:var(--ink-2s);line-height:1.72}
+.note li{margin-bottom:3px}
+.note code{font-family:var(--font-mono);font-size:11px;background:var(--panel-3);padding:1px 5px;border-radius:var(--r-xs);color:var(--ink)}
+.swatches{display:flex;gap:7px;margin-top:9px;flex-wrap:wrap}
+.sw{width:34px;height:34px;border-radius:var(--r-sm);border:1px solid var(--line);position:relative}
+.sw span{position:absolute;bottom:-16px;left:0;font-family:var(--font-mono);font-size:9px;color:var(--ink-4);white-space:nowrap}
+
+@media (max-width:1180px){
+  .workbench{grid-template-columns:1fr}
+  .inststrip{grid-template-columns:1fr 1fr}
+}
+@media print{ .preview-bar{display:none} }
+</style>
+</head>
+<body>
+
+<!-- ========== 图标集 ========== -->
+<svg style="display:none" aria-hidden="true"><defs>
+  <symbol id="i-drop" viewBox="0 0 24 24"><path d="M12 3.2s5.6 6.1 5.6 10.1a5.6 5.6 0 0 1-11.2 0C6.4 9.3 12 3.2 12 3.2z"/><path d="M9.4 13.6a2.7 2.7 0 0 0 2.6 3"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20 5H4v11h4l1 3 3.2-3H20z"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h5M13 7h7M4 17h8M16 17h4"/><circle cx="11" cy="7" r="2"/><circle cx="14" cy="17" r="2"/></symbol>
+  <symbol id="i-table" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="1.5"/><path d="M3 10h18M9.5 10v9.5M15 10v9.5"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="M9.5 8.5 6 12l3.5 3.5M14.5 8.5 18 12l-3.5 3.5"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 4v16h16"/><path d="M7.5 15.5l3.8-4 3 2.6 4.2-6"/></symbol>
+  <symbol id="i-bars" viewBox="0 0 24 24"><path d="M4 20h16"/><path d="M7.5 20v-8M12 20V5.5M16.5 20v-5.5"/></symbol>
+  <symbol id="i-palette" viewBox="0 0 24 24"><path d="M4.5 20.5h3.2L19 9.2l-3.2-3.2L4.5 17.3z"/><path d="M14.6 7.3l3.2 3.2"/><path d="M17.5 4.4a1.6 1.6 0 0 1 2.3 0l.5.5a1.6 1.6 0 0 1 0 2.3"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4"/><path d="M9.5 12.5h5M9.5 16h5"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="1.5"/><path d="M10 3.5v3M14 3.5v3M10 17.5v3M14 17.5v3M3.5 10h3M3.5 14h3M17.5 10h3M17.5 14h3"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="1.5"/><path d="M7 10.5l3 2.2-3 2.2M13 15.5h4"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.8l4.2 4.2L19 7.2"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.2 20.5 19.5h-17z"/><path d="M12 10v4M12 16.6h.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 8.2h.01"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6.5 9.5 12 15l5.5-5.5"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16.5V4.5M8 8.2 12 4.2l4 4"/><path d="M4.5 16v3.5h15V16"/></symbol>
+  <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3.5 13.6 8 18 9.6 13.6 11.2 12 15.7 10.4 11.2 6 9.6 10.4 8z"/><path d="M18 15.5l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5 18.5 12 8 18.5z"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M4.5 12 20 4.5 13.5 20l-2.3-6.2z"/><path d="M11.2 13.8 20 4.5"/></symbol>
+  <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.4-5.5"/><path d="M19.5 4.5V9h-4.5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4.5v11M8 11.8l4 4 4-4"/><path d="M4.5 19.5h15"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.2"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3.5 20.5 8 12 12.5 3.5 8z"/><path d="M3.5 12.5 12 17l8.5-4.5"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 1.8"/></symbol>
+</defs></svg>
+
+<!-- ========== 预览工具条 ========== -->
+<div class="preview-bar">
+  <span class="tag">预览工具条 · 不属于界面设计</span>
+  <span class="sep"></span>
+  <span>明暗</span>
+  <span class="seg" id="seg-theme">
+    <button data-theme="light" aria-pressed="true">浅色</button>
+    <button data-theme="dark" aria-pressed="false">深色</button>
+  </span>
+  <span>主色</span>
+  <span class="seg" id="seg-accent">
+    <button data-accent="teal" aria-pressed="true">青灰</button>
+    <button data-accent="indigo" aria-pressed="false">靛蓝</button>
+    <button data-accent="graphite" aria-pressed="false">石墨</button>
+  </span>
+  <span class="mono" style="color:var(--ink-4)">6 种组合，落地时只锁其中一套</span>
+</div>
+
+<!-- ========== 顶栏 ========== -->
+<header class="appbar">
+  <div class="brand">
+    <div class="brand-mark"><svg><use href="#i-drop"/></svg></div>
+    <div class="brand-txt">
+      <div class="brand-zh">物理约束嵌入 LLM 的地下水智能建模系统</div>
+      <div class="brand-en">Physical-LLM Groundwater Modeling · MVP</div>
+    </div>
+  </div>
+  <div class="appbar-spacer"></div>
+  <div class="chips">
+    <span class="chip"><span class="dot pulse"></span>求解器就绪</span>
+    <span class="chip">MF6 6.3.0</span>
+    <span class="chip">FloPy 3.10.0</span>
+    <span class="chip">GWF + GWT</span>
+    <span class="chip accent">会话 default</span>
+  </div>
+</header>
+
+<div class="shell">
+
+  <!-- ========== 工作台：对话 + 参数 ========== -->
+  <div class="workbench">
+
+    <!-- ── 左：建模对话 ── -->
+    <section class="panel">
+      <div class="panel-hd">
+        <svg class="ic"><use href="#i-chat"/></svg>
+        <span class="hd-zh">建模对话</span><span class="hd-en">Dialogue</span>
+        <span class="hd-rule"></span>
+        <span class="chip">阶段 intake → modeling</span>
+      </div>
+      <div class="chat">
+        <div class="chat-log">
+
+          <div class="msg user">
+            <div class="msg-role">User</div>
+            <div class="msg-body">
+              我要模拟某填埋场渗滤液中的氯化物在含水层中的运移。模拟范围东西
+              612284–616244 m，南北 3427412–3429283 m，两层，渗透系数 12.5 m/d。
+              填埋场范围见上传的 <span class="mono">landfill_arcs.shp</span>，补给速率
+              1×10⁻⁴ m/d，渗滤液浓度 20000 mg/L。模拟时长 15000 天，均匀分为 10 个应力期。
+              <span class="msg-time">14:31:52</span>
+            </div>
+          </div>
+
+          <div class="msg bot">
+            <div class="msg-role">Assistant</div>
+            <div class="msg-body">
+              已解析为结构化的模型输入（IR）。源区按上传的 SHP 名称匹配到
+              <span class="mono">landfill_arcs</span>，栅格化为 <strong>132 格</strong>，未发生全域展开。
+              <div class="kv-card">
+                <div class="kv-hd"><svg class="ic sm"><use href="#i-layers"/></svg>IR 抽取结果 · Extract</div>
+                <div class="kv-row"><div class="kv-k">domain.x_range</div><div class="kv-v">[612284, 616244] <span class="dim">m</span></div></div>
+                <div class="kv-row"><div class="kv-k">domain.y_range</div><div class="kv-v">[3427412, 3429283] <span class="dim">m</span></div></div>
+                <div class="kv-row"><div class="kv-k">grid</div><div class="kv-v">218 × 103 × 2 <span class="dim">@ 20.0 m</span></div></div>
+                <div class="kv-row"><div class="kv-k">stress_periods</div><div class="kv-v">nper = 10, total_time = 15000 <span class="dim">d → 每期 1500 d</span></div></div>
+                <div class="kv-row"><div class="kv-k">boundary_conditions</div><div class="kv-v">5 条 · CHD 1 / GHB 2 / RCH 2</div></div>
+                <div class="kv-row"><div class="kv-k">transport</div><div class="kv-v">GWT, 孔隙度 0.25, αL 10 m, αT 1 m, Kd 0.05</div></div>
+              </div>
+              <div class="callout">
+                <svg class="ic"><use href="#i-target"/></svg>
+                <div>
+                  <div class="callout-hd">源区定位</div>
+                  <span class="mono">landfill_boundary</span>：132 格（占全域 <span class="mono">0.59%</span>），
+                  面积 <span class="mono">54225 m²</span>，补给 <span class="mono">5.28 m³/d</span>
+                  <span class="dim">← shp:landfill_arcs</span>
+                </div>
+              </div>
+              <div class="callout warn">
+                <svg class="ic"><use href="#i-alert"/></svg>
+                <div>
+                  <div class="callout-hd">参数校验 · 12 条警告（3 条需留意）</div>
+                  <span class="mono">vka</span> 的单位是 <span class="mono">m</span>，该参数期望 <span class="mono">m/d</span>，请确认。
+                  另有 9 条枚举型参数未做范围检查的低优先提示（不影响建模）。
+                </div>
+              </div>
+              <span class="msg-time">14:31:56</span>
+            </div>
+          </div>
+
+          <div class="msg user">
+            <div class="msg-role">User</div>
+            <div class="msg-body">
+              确认，开始建模。
+              <span class="msg-time">14:32:01</span>
+            </div>
+          </div>
+
+          <div class="msg bot">
+            <div class="msg-role">Assistant</div>
+            <div class="msg-body">
+              建模已完成：水流（GWF）与溶质运移（GWT）两次求解均正常收敛，共
+              <strong>100 帧</strong>浓度输出，末刻 15000 d。<span class="dim">结果见下方「建模结果」。</span>
+              <span class="msg-time">14:32:26</span>
+            </div>
+          </div>
+
+        </div>
+
+        <div class="composer">
+          <div class="field">
+            <div class="field-lb"><span>输入建模需求 / Prompt</span><span class="unit">⏎ 发送 · ⇧⏎ 换行</span></div>
+            <textarea class="textarea" placeholder="例如：模拟承压含水层 1000×800 m，渗透系数 15 m/d，西侧 100 m、东侧 95 m 定水头…"></textarea>
+          </div>
+          <div class="composer-row">
+            <label class="dropzone grow">
+              <svg class="ic"><use href="#i-upload"/></svg>
+              拖入或点击上传 · ZIP / SHP / GeoTIFF / Excel
+            </label>
+            <button class="btn primary"><svg class="ic"><use href="#i-send"/></svg>发送</button>
+          </div>
+          <div class="actions">
+            <button class="btn sm ghost"><svg class="ic sm"><use href="#i-rotate"/></svg>清空</button>
+            <button class="btn sm ghost"><svg class="ic sm"><use href="#i-sparkle"/></svg>建议补全</button>
+            <span class="spacer"></span>
+            <span class="mini-note mono">缺失 0 项 · 阻断 0 项</span>
+            <button class="btn primary"><svg class="ic"><use href="#i-play"/></svg>开始建模</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 右：参数 / 审查 / 代码 ── -->
+    <div class="stack">
+
+      <section class="panel">
+        <div class="panel-hd">
+          <svg class="ic"><use href="#i-table"/></svg>
+          <span class="hd-zh">参数列表</span><span class="hd-en">Parameters</span>
+          <span class="hd-rule"></span>
+          <span class="hd-act"><button class="btn sm"><svg class="ic sm"><use href="#i-download"/></svg>参数传递</button></span>
+        </div>
+        <div class="panel-bd tight">
+          <table class="ptable">
+            <thead><tr><th>参数</th><th style="text-align:right">当前值</th><th>单位</th><th>优先级</th><th>状态</th></tr></thead>
+            <tbody>
+              <tr><td class="k">K<em>渗透系数</em></td><td class="v">12.5</td><td class="u">m/d</td><td><span class="tagp req">必需</span></td><td><span class="st ok"><span class="dot"></span>已确认</span></td></tr>
+              <tr><td class="k">nper<em>应力期数</em></td><td class="v">10</td><td class="u">期</td><td><span class="tagp imp">重要</span></td><td><span class="st ok"><span class="dot"></span>已确认</span></td></tr>
+              <tr><td class="k">total_time<em>模拟总时长</em></td><td class="v">15000</td><td class="u">d</td><td><span class="tagp imp">重要</span></td><td><span class="st ok"><span class="dot"></span>已确认</span></td></tr>
+              <tr><td class="k">porosity<em>孔隙度</em></td><td class="v">0.25</td><td class="u">—</td><td><span class="tagp req">必需</span></td><td><span class="st ok"><span class="dot"></span>已确认</span></td></tr>
+              <tr><td class="k">alh<em>纵向弥散度</em></td><td class="v">10.0</td><td class="u">m</td><td><span class="tagp imp">重要</span></td><td><span class="st ok"><span class="dot"></span>已确认</span></td></tr>
+              <tr><td class="k">ath1<em>横向弥散度</em></td><td class="v">1.0</td><td class="u">m</td><td><span class="tagp opt">可选</span></td><td><span class="st dim"><span class="dot"></span>默认值</span></td></tr>
+              <tr><td class="k">Kd<em>分配系数</em></td><td class="v">0.05</td><td class="u">mL/g</td><td><span class="tagp opt">可选</span></td><td><span class="st ok"><span class="dot"></span>已确认</span></td></tr>
+              <tr><td class="k">prsity_src<em>源浓度</em></td><td class="v">20000</td><td class="u">mg/L</td><td><span class="tagp req">必需</span></td><td><span class="st ok"><span class="dot"></span>已确认</span></td></tr>
+              <tr><td class="k">rate<em>补给速率</em></td><td class="v">1.0e-4</td><td class="u">m/d</td><td><span class="tagp req">必需</span></td><td><span class="st ok"><span class="dot"></span>已确认</span></td></tr>
+              <tr><td class="k">vka<em>垂向各向异性</em></td><td class="v">20.0</td><td class="u">m</td><td><span class="tagp opt">可选</span></td><td><span class="st warn"><span class="dot"></span>待确认</span></td></tr>
+              <tr><td class="k">delr / delc</td><td class="v">20.0</td><td class="u">m</td><td><span class="tagp imp">重要</span></td><td><span class="st ok"><span class="dot"></span>已确认</span></td></tr>
+              <tr><td class="k">top / botm</td><td class="v">230 / 175</td><td class="u">m</td><td><span class="tagp imp">重要</span></td><td><span class="st ok"><span class="dot"></span>已确认</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-ft">
+          <span>共 21 项，当前显示 12 项</span>
+          <span class="hd-rule"></span>
+          <button class="btn sm ghost">显示全部</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-hd">
+          <svg class="ic"><use href="#i-code"/></svg>
+          <span class="hd-zh">参数审查</span><span class="hd-en">IR Inspector</span>
+          <span class="hd-rule"></span>
+          <span class="hd-act">
+            <span class="chip">阶段 modeling</span>
+            <span class="chip">缺失 0</span>
+          </span>
+        </div>
+        <div class="panel-bd tight">
+          <pre class="code">{
+  <span class="s">"domain"</span>: {
+    <span class="k">"x_range"</span>: [<span class="n">612284.0</span>, <span class="n">616244.0</span>],
+    <span class="k">"y_range"</span>: [<span class="n">3427412.0</span>, <span class="n">3429283.0</span>],
+    <span class="k">"origin_xy"</span>: [<span class="n">612284.0</span>, <span class="n">3427412.0</span>]
+  },
+  <span class="s">"grid"</span>: { <span class="k">"nlay"</span>: <span class="n">2</span>, <span class="k">"nrow"</span>: <span class="n">103</span>, <span class="k">"ncol"</span>: <span class="n">218</span>, <span class="k">"delr"</span>: <span class="n">20.0</span>, <span class="k">"delc"</span>: <span class="n">20.0</span> },
+  <span class="s">"stress_periods"</span>: { <span class="k">"nper"</span>: <span class="n">10</span>, <span class="k">"total_time"</span>: <span class="n">15000</span>, <span class="k">"nstp"</span>: <span class="n">10</span> },
+  <span class="s">"transport"</span>: { <span class="k">"enabled"</span>: <span class="b">true</span>, <span class="k">"porosity"</span>: <span class="n">0.25</span>, <span class="k">"alh"</span>: <span class="n">10.0</span> } <span class="c">// …</span>
+}</pre>
+        </div>
+        <div class="panel-ft" style="display:block">
+          <div class="field-lb" style="margin-bottom:6px"><span>缺失参数 / Missing</span><span class="unit">全部满足</span></div>
+          <div class="tok-strip">
+            <span class="tok optional">无阻断项</span>
+            <span class="tok important">vka 单位待确认</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-hd">
+          <svg class="ic"><use href="#i-code"/></svg>
+          <span class="hd-zh">代码预览</span><span class="hd-en">FloPy Script</span>
+          <span class="hd-rule"></span>
+          <span class="hd-act"><button class="btn sm ghost">复制</button></span>
+        </div>
+        <div class="panel-bd tight">
+          <pre class="code"><span class="c"># GWT 溶质运移链路（自动生成）</span>
+<span class="k">sim</span> = flopy.mf6.MFSimulation(sim_name=<span class="s">"auto_model"</span>)
+tdis = ModflowTdis(sim, nper=<span class="n">10</span>, perioddata=[[<span class="n">1500.0</span>, <span class="n">10</span>, <span class="n">1.0</span>]]*<span class="n">10</span>)
+gwt  = ModflowGwt(sim, modelname=<span class="s">"auto_model_gwt"</span>)
+<span class="k">rch</span> = ModflowGwfrch(gwf, auxiliary=[<span class="s">"CONCENTRATION"</span>])
+<span class="k">ssm</span> = ModflowGwtssm(gwt, sources=[[<span class="s">"RCHA"</span>, <span class="s">"AUXMIXED"</span>, <span class="s">"CONCENTRATION"</span>]])</pre>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <!-- ========== 建模结果 ========== -->
+  <div class="results-hd">
+    <h2>建模结果</h2><span class="hd-en">Results Workbench</span>
+    <div class="chips" style="margin-left:14px">
+      <span class="chip">网格 218 × 103 × 2</span>
+      <span class="chip">应力期 10</span>
+      <span class="chip">总时长 15000 d</span>
+      <span class="chip">Δt 150 d</span>
+      <span class="chip accent">输出 100 帧</span>
+    </div>
+    <div class="pipeline">
+      <span class="step done"><svg class="ic sm"><use href="#i-check"/></svg><span class="n">1/3</span>意图解析<span class="mono">1.8 s</span></span>
+      <span class="step-sep"></span>
+      <span class="step done"><svg class="ic sm"><use href="#i-check"/></svg><span class="n">2/3</span>建模与运行<span class="mono">24.6 s</span></span>
+      <span class="step-sep"></span>
+      <span class="step done"><svg class="ic sm"><use href="#i-check"/></svg><span class="n">3/3</span>结果分析<span class="mono">3.1 s</span></span>
+    </div>
+  </div>
+
+  <section class="panel">
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" aria-selected="true" data-tab="t-summary"><svg class="ic sm"><use href="#i-info"/></svg>结果摘要</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="t-head"><svg class="ic sm"><use href="#i-chart"/></svg>水头分布</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="t-plume"><svg class="ic sm"><use href="#i-target"/></svg>污染羽</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="t-process"><svg class="ic sm"><use href="#i-bars"/></svg>过程分析</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="t-plot"><svg class="ic sm"><use href="#i-palette"/></svg>图件修改</button>
+      <button class="tab" role="tab" aria-selected="false" data-tab="t-report"><svg class="ic sm"><use href="#i-file"/></svg>报告</button>
+    </div>
+    <div class="panel-bd">
+
+      <!-- ── 结果摘要 ── -->
+      <div class="tabpanel" data-active="true" id="t-summary">
+        <div class="kpis">
+          <div class="kpi"><div class="kpi-lb">源区栅格化</div><div class="kpi-val">132<small>格</small></div><div class="kpi-hint">占全域 0.59% · 面积 54225 m²</div></div>
+          <div class="kpi"><div class="kpi-lb">源区补给量</div><div class="kpi-val">5.28<small>m³/d</small></div><div class="kpi-hint ok">未发生全域展开</div></div>
+          <div class="kpi"><div class="kpi-lb">末刻羽流范围</div><div class="kpi-val">10.19<small>%</small></div><div class="kpi-hint">t = 15000 d · 阈值 0.01 mg/L</div></div>
+          <div class="kpi"><div class="kpi-lb">质量平衡偏差</div><div class="kpi-val">0.04<small>%</small></div><div class="kpi-hint">累计注入 vs 理论值</div></div>
+          <div class="kpi"><div class="kpi-lb">最小浓度</div><div class="kpi-val">6.5e-13<small>mg/L</small></div><div class="kpi-hint">无负浓度伪影</div></div>
+          <div class="kpi"><div class="kpi-lb">收敛性</div><div class="kpi-val">正常</div><div class="kpi-hint">GWF 与 GWT 均达标</div></div>
+        </div>
+
+        <div class="stack" style="margin-top:16px;gap:12px">
+          <section class="panel">
+            <div class="panel-hd"><svg class="ic"><use href="#i-check"/></svg><span class="hd-zh">运行摘要</span><span class="hd-en">Run Summary</span><span class="hd-rule"></span><span class="hd-act"><span class="chip">t = 2026-09-17 14:32</span></span></div>
+            <div class="panel-bd tight">
+              <table class="dlist">
+                <tr><td class="k">计划模拟时长（来自 IR）</td><td class="v">15000 d</td><td class="d">total_time，10 期等分 → 每期 1500 d</td></tr>
+                <tr><td class="k">实际输出时间轴</td><td class="v">150 → 15000 d</td><td class="d">100 帧 · 间隔 150 d</td></tr>
+                <tr><td class="k">时间步长 Δt</td><td class="v">150 d</td><td class="d">nstp = 10 · Courant 保护</td></tr>
+                <tr><td class="k">源区边界（RCH）</td><td class="v">132 条记录</td><td class="d">rows 52–62 × cols 137–148（0-based）</td></tr>
+                <tr><td class="k">定水头边界（CHD）</td><td class="v">215.0 m</td><td class="d">row 102 = 最北一排</td></tr>
+                <tr><td class="k">通用水头边界（GHB）</td><td class="v">212.0 / 213.0 m</td><td class="d">南边界 row 0 · 东边界 col 217</td></tr>
+                <tr><td class="k">水均衡 · 总补给</td><td class="v">5.28 m³/d</td><td class="d">修复前为 898.16 m³/d</td></tr>
+              </table>
+            </div>
+            <div class="panel-ft">
+              <span class="mono">auto_model.tdis</span><span class="mono">auto_model_gwf.rch</span>
+              <span class="mono">auto_model_gwt.ucn</span><span class="mono">auto_model.gwt</span>
+              <span class="hd-rule"></span><span>工作目录 data/outputs/auto_model</span>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-hd"><svg class="ic"><use href="#i-alert"/></svg><span class="hd-zh">参数校验</span><span class="hd-en">Validation</span><span class="hd-rule"></span><span class="hd-act"><span class="chip">警告 12 · 错误 0</span></span></div>
+            <div class="panel-bd">
+              <div class="callout warn">
+                <svg class="ic"><use href="#i-alert"/></svg>
+                <div>
+                  <div class="callout-hd">需留意的 3 条</div>
+                  <div class="mono" style="font-size:11.5px;line-height:1.7">
+                    · total_time：模拟总时长 15000 d（41.1 年），未超出常规范围。<br>
+                    · vka：单位为 <span style="color:var(--warn)">m</span>，该参数期望 <span style="color:var(--warn)">m/d</span>，请确认。<br>
+                    · recharge_scope：未显式给出，按默认 <span style="color:var(--warn)">"zone"</span> 处理（补给只在源区）。
+                  </div>
+                </div>
+              </div>
+              <div style="margin-top:10px" class="tok-strip">
+                <span class="tok optional">另有 9 条枚举型参数未做范围检查的低优先提示</span>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- ── 水头分布 ── -->
+      <div class="tabpanel" id="t-head">
+        <figure class="fig">
+          <div class="fig-hd"><span class="fig-cap">水头等值线</span><span class="fig-sub">layer 0 · 末应力期 · 单位 m</span></div>
+          <svg viewBox="0 0 760 360" role="img" aria-label="水头等值线图">
+            <defs>
+              <linearGradient id="headGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#2E6FB7" stop-opacity=".30"/>
+                <stop offset="55%" stop-color="#5B9BD5" stop-opacity=".16"/>
+                <stop offset="100%" stop-color="#9EC9E8" stop-opacity=".08"/>
+              </linearGradient>
+              <pattern id="grid1" width="30" height="30" patternUnits="userSpaceOnUse">
+                <path d="M30 0H0V30" fill="none" style="stroke:var(--map-grid)" stroke-width="1"/>
+              </pattern>
+            </defs>
+            <rect x="60" y="30" width="600" height="283" style="fill:var(--map-bg)"/>
+            <rect x="60" y="30" width="600" height="283" fill="url(#grid1)"/>
+            <rect x="60" y="30" width="600" height="283" fill="url(#headGrad)"/>
+            <!-- 等值线：北高南低，212 → 215 m -->
+            <g fill="none" stroke="#2E6FB7" stroke-width="1.25" opacity=".85">
+              <path d="M60 293 C 190 286, 330 296, 460 288 S 590 292, 660 286"/>
+              <path d="M60 262 C 180 254, 320 266, 450 257 S 585 262, 660 255"/>
+              <path d="M60 230 C 175 221, 315 234, 445 224 S 580 230, 660 223"/>
+              <path d="M60 197 C 170 189, 310 201, 440 191 S 575 197, 660 190"/>
+              <path d="M60 163 C 168 156, 305 168, 435 158 S 570 164, 660 157"/>
+              <path d="M60 129 C 165 123, 300 134, 430 125 S 565 131, 660 124"/>
+              <path d="M60 94  C 162 89,  296 99,  425 91  S 560 97,  660 90"/>
+              <path d="M60 60  C 160 56,  292 65,  420 58  S 555 64,  660 57"/>
+            </g>
+            <g style="font-family:var(--font-mono)" font-size="9.5" fill="#2E6FB7" opacity=".95">
+              <text x="486" y="292">212.0</text>
+              <text x="486" y="261">212.4</text>
+              <text x="486" y="229">212.9</text>
+              <text x="486" y="196">213.3</text>
+              <text x="486" y="162">213.8</text>
+              <text x="486" y="128">214.2</text>
+              <text x="486" y="93">214.7</text>
+              <text x="486" y="59">215.0</text>
+            </g>
+            <!-- 边界标注 -->
+            <line x1="60" y1="30" x2="660" y2="30" style="stroke:var(--accent)" stroke-width="2.5"/>
+            <text x="66" y="24" font-size="10" style="font-family:var(--font-mono);fill:var(--accent-ink)">CHD 215.0 m · north_boundary</text>
+            <line x1="60" y1="313" x2="660" y2="313" style="stroke:var(--warn)" stroke-width="2.5" stroke-dasharray="6 4"/>
+            <text x="66" y="328" font-size="10" style="font-family:var(--font-mono);fill:var(--warn)">GHB 212.0 m · south_boundary</text>
+            <line x1="660" y1="30" x2="660" y2="313" style="stroke:var(--warn)" stroke-width="2.5" stroke-dasharray="6 4"/>
+            <text x="600" y="352" font-size="10" text-anchor="end" style="font-family:var(--font-mono);fill:var(--warn)">GHB 213.0 m · east_boundary</text>
+            <!-- 坐标轴 -->
+            <line x1="60" y1="313" x2="60" y2="30" style="stroke:var(--map-axis)"/>
+            <line x1="60" y1="313" x2="660" y2="313" style="stroke:var(--map-axis)"/>
+            <g font-size="9" text-anchor="middle" style="font-family:var(--font-mono);fill:var(--ink-4)">
+              <text x="92.7" y="343">612500</text><text x="320" y="343">614000</text><text x="547" y="343">615500</text>
+            </g>
+            <g font-size="9" text-anchor="end" style="font-family:var(--font-mono);fill:var(--ink-4)">
+              <text x="54" y="304">3427500</text><text x="54" y="167">3428500</text><text x="54" y="98">3429000</text>
+            </g>
+            <text x="360" y="357" font-size="9.5" text-anchor="middle" style="font-family:var(--font-mono);fill:var(--ink-4)">Easting (m)</text>
+            <text x="20" y="172" font-size="9.5" text-anchor="middle" transform="rotate(-90 20 172)" style="font-family:var(--font-mono);fill:var(--ink-4)">Northing (m)</text>
+            <!-- 北向 + 比例尺 -->
+            <g transform="translate(632,42)">
+              <path d="M0 18 0 0 5.5 7 -5.5 7z" style="fill:var(--ink-3)"/>
+              <text x="0" y="30" font-size="9.5" text-anchor="middle" style="font-family:var(--font-mono);fill:var(--ink-3)">N</text>
+            </g>
+            <g transform="translate(76,300)">
+              <line x1="0" y1="0" x2="75.75" y2="0" style="stroke:var(--ink-3)" stroke-width="1.5"/>
+              <line x1="0" y1="-4" x2="0" y2="4" style="stroke:var(--ink-3)"/>
+              <line x1="75.75" y1="-4" x2="75.75" y2="4" style="stroke:var(--ink-3)"/>
+              <text x="78" y="3.5" font-size="9" style="font-family:var(--font-mono);fill:var(--ink-3)">500 m</text>
+            </g>
+          </svg>
+          <div class="fig-ft"><span>层位 <b>layer 0</b></span><span>范围 <b>212.0 – 215.1 m</b></span><span class="ok">南北水头差 3.1 m · 边界驱动</span></div>
+        </figure>
+      </div>
+
+      <!-- ── 污染羽 ── -->
+      <div class="tabpanel" id="t-plume">
+
+        <div class="panel-hd" style="border:0;padding-left:0;background:transparent;margin-bottom:10px">
+          <svg class="ic"><use href="#i-chart"/></svg>
+          <span class="hd-zh">演化总览</span><span class="hd-en">Evolution OverTime</span>
+          <span class="hd-rule"></span>
+          <span class="hd-act"><span class="chip">100 帧 · 150 → 15000 d</span></span>
+        </div>
+        <div class="multiples">
+          <div class="multi">
+            <div class="multi-hd"><span>t = <b>150</b> d</span><span>0.42%</span></div>
+            <svg viewBox="0 0 200 130">
+              <rect x="14" y="10" width="172" height="100"/ style="fill:var(--map-bg);stroke:var(--line)">
+              <rect x="104" y="46" width="14" height="12" fill="none" style="stroke:var(--accent)" stroke-dasharray="3 2"/>
+              <ellipse cx="111" cy="58" rx="15" ry="11" fill="#2C3E7B" opacity=".26"/>
+              <ellipse cx="111" cy="57" rx="10" ry="7.5" fill="#2A788E" opacity=".42"/>
+              <ellipse cx="111" cy="56" rx="5" ry="4" fill="#7EBB34" opacity=".6"/>
+            </svg>
+          </div>
+          <div class="multi">
+            <div class="multi-hd"><span>t = <b>1500</b> d</span><span>1.86%</span></div>
+            <svg viewBox="0 0 200 130">
+              <rect x="14" y="10" width="172" height="100"/ style="fill:var(--map-bg);stroke:var(--line)">
+              <rect x="104" y="46" width="14" height="12" fill="none" style="stroke:var(--accent)" stroke-dasharray="3 2"/>
+              <ellipse cx="111" cy="66" rx="27" ry="20" fill="#2C3E7B" opacity=".26"/>
+              <ellipse cx="111" cy="63" rx="19" ry="14" fill="#2A788E" opacity=".42"/>
+              <ellipse cx="111" cy="60" rx="11" ry="8" fill="#7EBB34" opacity=".6"/>
+              <ellipse cx="111" cy="58" rx="5" ry="4" fill="#DCE319" opacity=".8"/>
+            </svg>
+          </div>
+          <div class="multi">
+            <div class="multi-hd"><span>t = <b>6000</b> d</span><span>6.11%</span></div>
+            <svg viewBox="0 0 200 130">
+              <rect x="14" y="10" width="172" height="100"/ style="fill:var(--map-bg);stroke:var(--line)">
+              <rect x="104" y="46" width="14" height="12" fill="none" style="stroke:var(--accent)" stroke-dasharray="3 2"/>
+              <ellipse cx="110" cy="78" rx="44" ry="31" fill="#2C3E7B" opacity=".26"/>
+              <ellipse cx="110" cy="72" rx="32" ry="23" fill="#2A788E" opacity=".40"/>
+              <ellipse cx="110" cy="66" rx="20" ry="14" fill="#7EBB34" opacity=".55"/>
+              <ellipse cx="110" cy="59" rx="9" ry="6.5" fill="#DCE319" opacity=".8"/>
+            </svg>
+          </div>
+          <div class="multi">
+            <div class="multi-hd"><span>t = <b>15000</b> d</span><span>10.19%</span></div>
+            <svg viewBox="0 0 200 130">
+              <rect x="14" y="10" width="172" height="100"/ style="fill:var(--map-bg);stroke:var(--line)">
+              <rect x="104" y="46" width="14" height="12" fill="none" style="stroke:var(--accent)" stroke-dasharray="3 2"/>
+              <ellipse cx="110" cy="88" rx="62" ry="38" fill="#2C3E7B" opacity=".24"/>
+              <ellipse cx="110" cy="80" rx="46" ry="28" fill="#2A788E" opacity=".38"/>
+              <ellipse cx="110" cy="71" rx="30" ry="18" fill="#7EBB34" opacity=".5"/>
+              <ellipse cx="110" cy="61" rx="14" ry="9" fill="#DCE319" opacity=".78"/>
+            </svg>
+          </div>
+        </div>
+        <div class="fig-ft" style="border:1px solid var(--line);border-top:0;background:var(--panel-2);border-radius:0 0 var(--r-md) var(--r-md);margin-bottom:20px">
+          <span>阈值 <b>0.01 mg/L</b></span><span>源区 <b>landfill（132 格）</b></span><span class="ok">羽流自源区向南迁移，未触及全域</span>
+        </div>
+
+        <div class="panel-hd" style="border:0;padding-left:0;background:transparent;margin-bottom:10px">
+          <svg class="ic"><use href="#i-target"/></svg>
+          <span class="hd-zh">单时刻交互图</span><span class="hd-en">Single-time Plume</span>
+          <span class="hd-rule"></span>
+          <span class="hd-act"><span class="chip">线性插值 · 不外推</span></span>
+        </div>
+
+        <div class="panel" style="margin-bottom:12px">
+          <div class="panel-hd"><svg class="ic"><use href="#i-sliders"/></svg><span class="hd-zh">显示控制</span><span class="hd-en">Control</span><span class="hd-rule"></span><span class="hd-act"><span class="mono" style="font-size:11px;color:var(--ink-4)">改动后点「确定重绘」或按回车生效</span></span></div>
+          <div class="panel-bd">
+            <div class="inststrip">
+              <div class="field">
+                <div class="field-lb"><span>输出时刻 · Time</span><span class="unit mono">150 — 15000 d</span></div>
+                <input type="range" min="150" max="15000" step="150" value="3000" style="--pct:19%">
+                <div class="tickbar"><span>150</span><span>3750</span><span>7500</span><span>11250</span><span>15000</span></div>
+              </div>
+              <div class="field">
+                <div class="field-lb"><span>精确时刻</span><span class="unit">d</span></div>
+                <input class="input mono" value="360">
+              </div>
+              <div class="field" data-crange>
+                <div class="field-lb"><span>浓度下限</span><span class="unit">mg/L</span></div>
+                <input class="input mono" placeholder="自动" value="300">
+              </div>
+              <div class="field" data-crange>
+                <div class="field-lb"><span>浓度上限</span><span class="unit">mg/L</span></div>
+                <input class="input mono" placeholder="自动" value="3000">
+              </div>
+              <button class="btn primary" style="height:31px"><svg class="ic"><use href="#i-check"/></svg>确定重绘</button>
+            </div>
+            <div class="actions" style="margin-top:10px">
+              <label class="switch"><input type="checkbox" checked><span class="track"></span>自动色标范围</label>
+              <span class="spacer"></span>
+              <span class="mini-note">勾选自动时忽略上下限输入框；单个框留空则该项回退自动</span>
+            </div>
+          </div>
+        </div>
+
+        <figure class="fig">
+          <div class="fig-hd"><span class="fig-cap">污染羽单时刻 · t = 360 d</span><span class="fig-sub">线性插值自 300 d 与 450 d</span></div>
+          <svg viewBox="0 0 760 360" role="img" aria-label="污染羽单时刻图">
+            <defs>
+              <pattern id="grid2" width="30" height="30" patternUnits="userSpaceOnUse">
+                <path d="M30 0H0V30" fill="none" style="stroke:var(--map-grid)" stroke-width="1"/>
+              </pattern>
+              <linearGradient id="tail" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#2A788E" stop-opacity=".34"/>
+                <stop offset="100%" stop-color="#2C3E7B" stop-opacity=".04"/>
+              </linearGradient>
+              <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+                <feGaussianBlur stdDeviation="4.5"/>
+              </filter>
+            </defs>
+            <rect x="60" y="30" width="600" height="283" style="fill:var(--map-bg)"/>
+            <rect x="60" y="30" width="600" height="283" fill="url(#grid2)"/>
+            <!-- 流速方向箭头（向南） -->
+            <g style="stroke:var(--map-grid)" fill="none">
+              <path d="M150 120v34M150 154l-3.5-5.5M150 154l3.5-5.5" stroke-width="1.2"/>
+              <path d="M300 120v34M300 154l-3.5-5.5M300 154l3.5-5.5" stroke-width="1.2"/>
+              <path d="M600 120v34M600 154l-3.5-5.5M600 154l3.5-5.5" stroke-width="1.2"/>
+            </g>
+            <!-- 羽流：源区在下游方向的浓度带 -->
+            <path d="M476 168 C 470 205, 468 240, 480 268 C 492 292, 516 292, 528 268 C 540 240, 536 205, 530 168 Z" fill="url(#tail)"/>
+            <g filter="url(#soft)">
+              <ellipse cx="503" cy="196" rx="52" ry="46" fill="#2C3E7B" opacity=".30"/>
+              <ellipse cx="502" cy="190" rx="38" ry="33" fill="#2A788E" opacity=".48"/>
+              <ellipse cx="501" cy="182" rx="24" ry="21" fill="#7EBB34" opacity=".62"/>
+              <ellipse cx="500" cy="172" rx="13" ry="11" fill="#DCE319" opacity=".85"/>
+            </g>
+            <!-- 源区（填埋场） -->
+            <rect x="475" y="140" width="36" height="30" style="fill:var(--accent)" opacity=".10"/>
+            <rect x="475" y="140" width="36" height="30" fill="none" style="stroke:var(--accent)" stroke-width="1.5" stroke-dasharray="4 3"/>
+            <line x1="511" y1="140" x2="560" y2="118" style="stroke:var(--accent-line)" stroke-width="1"/>
+            <text x="563" y="115" font-size="9.5" style="font-family:var(--font-mono);fill:var(--accent-ink)">landfill_boundary</text>
+            <text x="563" y="127" font-size="9" style="font-family:var(--font-mono);fill:var(--ink-4)">132 cells · 20000 mg/L</text>
+            <!-- 坐标轴 -->
+            <line x1="60" y1="313" x2="60" y2="30" style="stroke:var(--map-axis)"/>
+            <line x1="60" y1="313" x2="660" y2="313" style="stroke:var(--map-axis)"/>
+            <g font-size="9" text-anchor="middle" style="font-family:var(--font-mono);fill:var(--ink-4)">
+              <text x="92.7" y="328">612500</text><text x="320" y="328">614000</text><text x="547" y="328">615500</text>
+            </g>
+            <g font-size="9" text-anchor="end" style="font-family:var(--font-mono);fill:var(--ink-4)">
+              <text x="54" y="304">3427500</text><text x="54" y="167">3428500</text><text x="54" y="98">3429000</text>
+            </g>
+            <text x="360" y="342" font-size="9.5" text-anchor="middle" style="font-family:var(--font-mono);fill:var(--ink-4)">Easting (m)</text>
+            <text x="20" y="172" font-size="9.5" text-anchor="middle" transform="rotate(-90 20 172)" style="font-family:var(--font-mono);fill:var(--ink-4)">Northing (m)</text>
+            <!-- 北向 + 比例尺 -->
+            <g transform="translate(632,42)">
+              <path d="M0 18 0 0 5.5 7 -5.5 7z" style="fill:var(--ink-3)"/>
+              <text x="0" y="30" font-size="9.5" text-anchor="middle" style="font-family:var(--font-mono);fill:var(--ink-3)">N</text>
+            </g>
+            <g transform="translate(76,300)">
+              <line x1="0" y1="0" x2="75.75" y2="0" style="stroke:var(--ink-3)" stroke-width="1.5"/>
+              <line x1="0" y1="-4" x2="0" y2="4" style="stroke:var(--ink-3)"/>
+              <line x1="75.75" y1="-4" x2="75.75" y2="4" style="stroke:var(--ink-3)"/>
+              <text x="78" y="3.5" font-size="9" style="font-family:var(--font-mono);fill:var(--ink-3)">500 m</text>
+            </g>
+            <!-- 色标 -->
+            <defs>
+              <linearGradient id="vir" x1="0" y1="1" x2="0" y2="0">
+                <stop offset="0%"   stop-color="#440154"/>
+                <stop offset="25%"  stop-color="#3B528B"/>
+                <stop offset="50%"  stop-color="#21918C"/>
+                <stop offset="75%"  stop-color="#5EC962"/>
+                <stop offset="100%" stop-color="#FDE725"/>
+              </linearGradient>
+            </defs>
+            <rect x="692" y="30" width="14" height="283" fill="url(#vir)" style="stroke:var(--line)"/>
+            <g font-size="9" style="font-family:var(--font-mono);fill:var(--ink-4)">
+              <text x="710" y="316">0</text>
+              <text x="710" y="247">750</text>
+              <text x="710" y="177">1500</text>
+              <text x="710" y="108">2250</text>
+              <text x="710" y="35">3000</text>
+            </g>
+            <text x="703" y="24" font-size="9" text-anchor="middle" style="font-family:var(--font-mono);fill:var(--ink-4)">mg/L</text>
+          </svg>
+          <div class="fig-ft telemetry">
+            <span>t = <b>360 d</b>（由 300 d 与 450 d 线性插值，权重 0.40）</span>
+            <span>色标 <b>300 – 3000 mg/L</b></span>
+            <span>本帧最大浓度 <b>2841 mg/L</b></span>
+            <span class="ok">羽流面积 1.42%（阈值 0.01 mg/L）</span>
+          </div>
+        </figure>
+      </div>
+
+      <!-- ── 过程分析 ── -->
+      <div class="tabpanel" id="t-process">
+        <div class="workbench" style="grid-template-columns:minmax(0,1fr) minmax(0,1fr)">
+          <section class="panel">
+            <div class="panel-hd"><svg class="ic"><use href="#i-bars"/></svg><span class="hd-zh">主控过程贡献</span><span class="hd-en">Process Contribution</span><span class="hd-rule"></span><span class="hd-act"><span class="chip">合计 100.0%</span></span></div>
+            <div class="panel-bd">
+              <div class="bars">
+                <div class="bar-row"><div class="bar-lb"><svg class="ic sm"><use href="#i-sliders"/></svg>对流 Advection</div><div class="bar-track"><div class="bar-fill" style="width:78.4%"></div></div><div class="bar-v">78.4%</div></div>
+                <div class="bar-row"><div class="bar-lb"><svg class="ic sm"><use href="#i-layers"/></svg>水动力弥散</div><div class="bar-track"><div class="bar-fill d2" style="width:16.2%"></div></div><div class="bar-v">16.2%</div></div>
+                <div class="bar-row"><div class="bar-lb"><svg class="ic sm"><use href="#i-target"/></svg>吸附 Sorption</div><div class="bar-track"><div class="bar-fill d3" style="width:5.1%"></div></div><div class="bar-v">5.1%</div></div>
+                <div class="bar-row"><div class="bar-lb"><svg class="ic sm"><use href="#i-clock"/></svg>一阶衰减</div><div class="bar-track"><div class="bar-fill d4" style="width:0.3%"></div></div><div class="bar-v">0.3%</div></div>
+              </div>
+              <div class="mini-note" style="margin-top:14px">
+                判据：各过程对源区下游控制点浓度通量的时段累计贡献，合计归一化为 100%。对流主导，
+                说明该场地以平流输运为主、弥散仅起展宽作用。
+              </div>
+            </div>
+          </section>
+
+          <figure class="fig">
+            <div class="fig-hd"><span class="fig-cap">源区下游控制点突破曲线</span><span class="fig-sub">C/C₀ — t</span></div>
+            <svg viewBox="0 0 380 240">
+              <rect x="46" y="18" width="308" height="176" style="fill:var(--map-bg)"/>
+              <g style="stroke:var(--map-grid)" fill="none">
+                <path d="M46 62h308M46 106h308M46 150h308M46 194h308"/>
+                <path d="M123 18v176M200 18v176M277 18v176"/>
+              </g>
+              <line x1="46" y1="194" x2="354" y2="194" style="stroke:var(--map-axis)"/>
+              <line x1="46" y1="18" x2="46" y2="194" style="stroke:var(--map-axis)"/>
+              <path d="M46 194 C 92 193, 108 120, 140 96 C 172 74, 208 62, 250 58 C 292 55, 330 54, 354 54"
+                    fill="none" style="stroke:var(--accent)" stroke-width="1.8"/>
+              <path d="M46 194 C 92 193, 108 120, 140 96 C 172 74, 208 62, 250 58 C 292 55, 330 54, 354 54 L354 194 Z"
+                    style="fill:var(--accent)" opacity=".08" stroke="none"/>
+              <g font-size="9" style="font-family:var(--font-mono);fill:var(--ink-4)">
+                <text x="42" y="197" text-anchor="end">0.0</text>
+                <text x="42" y="152" text-anchor="end">0.25</text>
+                <text x="42" y="108" text-anchor="end">0.50</text>
+                <text x="42" y="64" text-anchor="end">0.75</text>
+                <text x="42" y="21" text-anchor="end">1.00</text>
+                <text x="46" y="210">0</text><text x="123" y="210" text-anchor="middle">3750</text>
+                <text x="200" y="210" text-anchor="middle">7500</text><text x="277" y="210" text-anchor="middle">11250</text>
+                <text x="354" y="210" text-anchor="end">15000</text>
+                <text x="200" y="230" text-anchor="middle">t (d)</text>
+              </g>
+              <line x1="46" y1="88" x2="354" y2="88" style="stroke:var(--warn)" stroke-dasharray="4 3" stroke-width="1"/>
+              <text x="350" y="84" font-size="9" text-anchor="end" style="font-family:var(--font-mono);fill:var(--warn)">C/C₀ = 0.5 · t₅₀ = 1580 d</text>
+            </svg>
+            <div class="fig-ft"><span>控制点 <b>(row 20, col 143)</b></span><span>t₅₀ <b>1580 d</b></span><span>峰值 C/C₀ <b>0.98</b></span></div>
+          </figure>
+        </div>
+      </div>
+
+      <!-- ── 图件修改 ── -->
+      <div class="tabpanel" id="t-plot">
+        <div class="note" style="max-width:760px">
+          <h4><svg class="ic"><use href="#i-palette"/></svg>用自然语言描述图件修改 <span class="hd-en">Natural-language Styling</span></h4>
+          <p style="margin:6px 0 10px;font-size:12.5px;color:var(--ink-2s)">
+            修改只作用于图件外观（配色、字号、等值线间隔、图例位置、标注），不改动模型参数与数值结果。
+          </p>
+          <div class="field">
+            <div class="field-lb"><span>修改指令</span><span class="unit">中英文均可</span></div>
+            <textarea class="textarea" placeholder="例如：把颜色改成蓝色系，等值线间隔设为 2 米，标题字体改大">把配色改为蓝色系，等值线间隔设为 2 m，隐藏流向箭头，标题改为「承压含水层水头分布」</textarea>
+          </div>
+          <div class="actions">
+            <button class="btn primary"><svg class="ic"><use href="#i-palette"/></svg>应用修改</button>
+            <button class="btn sm ghost"><svg class="ic sm"><use href="#i-rotate"/></svg>恢复默认</button>
+            <span class="spacer"></span>
+            <span class="mini-note mono">上一帧已应用 3 项样式改动</span>
+          </div>
+          <div class="tok-strip" style="margin-top:12px">
+            <span class="tok">把颜色改成蓝色系，等值线间隔设为 2m</span>
+            <span class="tok">隐藏流向箭头，标题改为「承压含水层水头分布」</span>
+            <span class="tok">井标记改成蓝色圆形，加大尺寸</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── 报告 ── -->
+      <div class="tabpanel" id="t-report">
+        <div class="stack" style="max-width:760px;gap:12px">
+          <div class="filecard">
+            <div class="fi"><svg class="ic"><use href="#i-file"/></svg></div>
+            <div style="flex:1">
+              <div class="fn">modeling_report.docx</div>
+              <div class="fm">1.24 MB · 生成于 2026-09-17 14:32 · 含 6 图 4 表</div>
+            </div>
+            <button class="btn"><svg class="ic"><use href="#i-download"/></svg>下载</button>
+          </div>
+          <div class="panel">
+            <div class="panel-hd"><svg class="ic"><use href="#i-file"/></svg><span class="hd-zh">报告章节</span><span class="hd-en">Contents</span></div>
+            <div class="panel-bd tight">
+              <table class="dlist">
+                <tr><td class="k">1. 模型概况与数据来源</td><td class="v">已生成</td><td class="d">含上传图层清单与坐标系说明</td></tr>
+                <tr><td class="k">2. 参数汇总表</td><td class="v">21 项</td><td class="d">含单位、取值来源与优先级</td></tr>
+                <tr><td class="k">3. 水流模型与边界条件</td><td class="v">已生成</td><td class="d">CHD / GHB / RCH 明细</td></tr>
+                <tr><td class="k">4. 溶质运移设置</td><td class="v">已生成</td><td class="d">GWT 参数与源汇接线</td></tr>
+                <tr><td class="k">5. 结果与图件</td><td class="v">6 图</td><td class="d">水头、污染羽、过程贡献</td></tr>
+                <tr><td class="k">6. 局限性与建议</td><td class="v">已生成</td><td class="d">含 12 条校验警告的处置说明</td></tr>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ========== 上传文件格式说明 ========== -->
+  <div style="margin-top:22px">
+    <div class="acc" data-open="false">
+      <button class="acc-hd" data-acc>
+        <svg class="ic"><use href="#i-upload"/></svg>
+        上传文件格式说明 <span class="hd-en">Supported Formats</span>
+        <svg class="ic chev"><use href="#i-chevron"/></svg>
+      </button>
+      <div class="acc-bd">
+        <div class="panel-bd" style="max-width:1000px">
+          <div class="callout" style="margin:0 0 12px">
+            <svg class="ic"><use href="#i-info"/></svg>
+            <div><strong>推荐方式</strong>：将所有文件打包为一个 <span class="mono">.zip</span> 上传，系统自动解压并识别其中的数据文件。</div>
+          </div>
+          <table class="fmttable">
+            <thead><tr><th>类型</th><th>扩展名</th><th>建模用途</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td>ZIP 压缩包</td><td><code>.zip</code></td><td>一键上传所有文件</td><td>推荐；自动识别包内数据文件</td></tr>
+              <tr><td>Shapefile 面</td><td><code>.shp .shx .dbf .prj</code></td><td>模型边界、参数分区</td><td>4 个配套文件必须齐全</td></tr>
+              <tr><td>Shapefile 线</td><td><code>.shp …</code></td><td>河流弧段、GHB 边界</td><td>线要素自动识别为边界</td></tr>
+              <tr><td>Shapefile 点</td><td><code>.shp …</code></td><td>井位、观测点</td><td>点要素自动识别为井</td></tr>
+              <tr><td>GeoJSON / KML</td><td><code>.geojson .kml</code></td><td>边界、要素</td><td>单文件自带几何与属性</td></tr>
+              <tr><td>Excel / CSV</td><td><code>.xlsx .xls .csv</code></td><td>井信息、时间序列</td><td>自动识别坐标列（x/y、经纬度、E/N）</td></tr>
+              <tr><td>GeoTIFF</td><td><code>.tif .tiff</code></td><td>DEM 高程、参数分布</td><td>按真实地理坐标叠加</td></tr>
+              <tr><td>图片底图</td><td><code>.png .jpg .bmp</code></td><td>底图影像</td><td>无地理参考时按模型范围铺放</td></tr>
+              <tr><td>ASCII Grid</td><td><code>.asc</code></td><td>栅格数据</td><td>ESRI ASCII 格式</td></tr>
+            </tbody>
+          </table>
+          <div class="callout warn" style="margin-top:12px">
+            <svg class="ic"><use href="#i-alert"/></svg>
+            <div>
+              <div class="callout-hd">使用限制</div>
+              文件总大小建议 ≤ 100 MB；每个 <span class="mono">.shp</span> 须附同名 <span class="mono">.shx/.dbf/.prj</span>；
+              CSV/Excel 推荐 UTF-8；空间数据请统一坐标系；ZIP 内请勿包含大量无关文件。
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 调试日志 ========== -->
+  <div style="margin-top:12px">
+    <div class="acc" data-open="false">
+      <button class="acc-hd" data-acc>
+        <svg class="ic"><use href="#i-terminal"/></svg>
+        调试日志 · 实时管道追踪 <span class="hd-en">Pipeline Trace</span>
+        <svg class="ic chev"><use href="#i-chevron"/></svg>
+      </button>
+      <div class="acc-bd">
+        <div class="console">
+          <div class="ln"><span class="ts">14:31:52.118</span><span class="lv info">INFO</span><span class="msg">session=default  intent=modeling  phase intake → collecting</span></div>
+          <div class="ln"><span class="ts">14:31:53.402</span><span class="lv info">INFO</span><span class="msg">Step 1/3  意图解析 · 抽取实体 27 项 <span class="dim">(1.28 s)</span></span></div>
+          <div class="ln"><span class="ts">14:31:54.870</span><span class="lv info">INFO</span><span class="msg">file_parse  landfill_arcs.shp  →  4 LineString  polygonize  →  1 polygon  54225.0 m²</span></div>
+          <div class="ln"><span class="ts">14:31:55.113</span><span class="lv ok">OK</span><span class="msg">source_zone  resolved_from=shp_name_match:landfill_arcs  cells=132 <span class="dim">(0.59% of domain)</span></span></div>
+          <div class="ln"><span class="ts">14:31:55.640</span><span class="lv warn">WARN</span><span class="msg">validator  12 warnings / 0 errors   →  vka unit "m" ≠ "m/d"</span></div>
+          <div class="ln"><span class="ts">14:32:01.004</span><span class="lv info">INFO</span><span class="msg">Step 2/3  建模与运行 · build_and_run  workspace=data/outputs/auto_model</span></div>
+          <div class="ln"><span class="ts">14:32:06.771</span><span class="lv info">INFO</span><span class="msg">tdis  NPER=10  perioddata=[1500.0, 10, 1.0]×10  总时长=15000.0 d</span></div>
+          <div class="ln"><span class="ts">14:32:07.208</span><span class="lv info">INFO</span><span class="msg">rch   MAXBOUND=132   rows 52..62  cols 137..148   Σrate=5.28 m³/d</span></div>
+          <div class="ln"><span class="ts">14:32:19.446</span><span class="lv ok">OK</span><span class="msg">mf6  GWF 收敛  <span class="dim">(12.2 s)</span>   GWT 收敛  <span class="dim">(7.1 s)</span></span></div>
+          <div class="ln"><span class="ts">14:32:24.902</span><span class="lv info">INFO</span><span class="msg">ucn   100 帧  150 → 15000 d  Δt=150 d</span></div>
+          <div class="ln"><span class="ts">14:32:26.902</span><span class="lv ok">OK</span><span class="msg">Step 3/3  结果分析 · 6 图 4 表  报告已生成 <span class="dim">(3.1 s)</span></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 快速开始 ========== -->
+  <div style="margin-top:12px">
+    <section class="panel">
+      <div class="panel-hd"><svg class="ic"><use href="#i-sparkle"/></svg><span class="hd-zh">快速开始</span><span class="hd-en">Quick Start</span><span class="hd-rule"></span><span class="hd-act"><span class="chip">示例算例</span></span></div>
+      <div class="quick">
+        <div class="num">1</div>
+        <div class="mono" style="font-size:11.5px;color:var(--ink-2s);line-height:1.7">
+          开展项目名称为 try 的地下水流模拟：单层非承压含水层稳态模拟，范围东西 0–1000 m、
+          南北 0–800 m，渗透系数 15 m/d；西侧定水头 100 m，东侧定水头 95 m，南北侧零流量边界。
+        </div>
+        <button class="btn sm"><svg class="ic sm"><use href="#i-chat"/></svg>填入对话</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- ========== 设计说明 ========== -->
+  <div style="margin-top:22px">
+    <div class="acc" data-open="true">
+      <button class="acc-hd" data-acc>
+        <svg class="ic"><use href="#i-info"/></svg>
+        设计说明与 Gradio 落地方式 <span class="hd-en">Design Notes</span>
+        <svg class="ic chev"><use href="#i-chevron"/></svg>
+      </button>
+      <div class="acc-bd">
+        <div class="panel-bd">
+          <div class="notes">
+
+            <div class="note">
+              <h4><svg class="ic"><use href="#i-palette"/></svg>为什么"不幼稚" <span class="hd-en">Visual Language</span></h4>
+              <ul>
+                <li><b>去掉表情符号</b>：面板标题改用线性图标 + 中英双标签（中文主标签 + 9.5px 等宽大写英文副标签），这是仪器类软件的语言，不是消费级产品的语言。</li>
+                <li><b>圆角收紧到 3–6px</b>，取消大阴影，改用 1px 细线分隔 —— 边界靠线而不是靠投影。</li>
+                <li><b>颜色只给数据</b>：界面本身只用中性灰阶 + 一个强调色；彩色面积只出现在图件、状态点和优先级标签上。</li>
+                <li><b>信息密度提高</b>：14 行参数表、遥测行、管道进度条同屏可见，符合工程师"一屏看全"的习惯。</li>
+                <li><b>数字全部等宽 + 表格数字对齐</b>（<span class="mono">tabular-nums</span>），坐标、浓度、时长可以竖向比对。</li>
+              </ul>
+              <div class="swatches">
+                <div class="sw" style="background:var(--accent)"><span>强调色</span></div>
+                <div class="sw" style="background:var(--ok)"><span>正常</span></div>
+                <div class="sw" style="background:var(--warn)"><span>警告</span></div>
+                <div class="sw" style="background:var(--err)"><span>错误</span></div>
+                <div class="sw" style="background:var(--panel-3)"><span>中性面</span></div>
+              </div>
+            </div>
+
+            <div class="note">
+              <h4><svg class="ic"><use href="#i-cpu"/></svg>落地方式 <span class="hd-en">Gradio 6.18</span></h4>
+              <ul>
+                <li><code>gr.Blocks(css=…, theme=gr.themes.Base())</code> —— 已在本机实测：自定义 CSS 确实注入进页面（起了临时服务抓页面验证），<code>css</code> / <code>theme</code> / <code>head</code> 在 6.18 仍可通过 kwargs 传入。</li>
+                <li>主题令牌全部写成 CSS 变量，一套变量同时喂 <code>gr.themes.Base().set(...)</code> 和自定义 CSS，避免两套色值漂移。</li>
+                <li>组件原生能力优先：<code>variant="primary"</code>、<code>size="sm"</code>、<code>gr.Accordion</code>、<code>gr.Tabs</code>、<code>gr.Dataframe</code>，只在样式上覆盖。</li>
+                <li>图件侧同步换字体与配色（<code>matplotlib</code> rcParams + 同一套色值），否则界面精致而图件仍是默认样式，会更显割裂。</li>
+              </ul>
+            </div>
+
+            <div class="note">
+              <h4><svg class="ic"><use href="#i-alert"/></svg>需要你定夺的三处 <span class="hd-en">Open Choices</span></h4>
+              <ul>
+                <li><b>中文/英文标签</b>：现在每个面板是"中文 + 等宽英文副标签"。若嫌英文多余，可只留中文（去掉 <code>.hd-en</code> 即可，不影响布局）。</li>
+                <li><b>默认主题</b>：浅色更接近论文/报告印象，深色更像专业软件。建议默认<b>浅色</b>，深色作为可切换项保留 —— 请指定。</li>
+                <li><b>对话区样式</b>：现在设计成"角色标签 + 平铺内容"（无气泡）。这需要覆盖 Gradio Chatbot 的 <code>.message</code> 类；若覆盖不稳，退化为方角气泡（视觉略降但实现稳）。</li>
+              </ul>
+            </div>
+
+            <div class="note">
+              <h4><svg class="ic"><use href="#i-layers"/></svg>刻意没改的东西 <span class="hd-en">Unchanged</span></h4>
+              <ul>
+                <li><b>模块与控件结构一字未动</b>：对话、参数表、IR 审查、代码预览、六个结果页签、调试日志、快速开始，位置与层级都保持原样，改动只发生在样式层。</li>
+                <li><b>不改任何文案的含义</b>：只把"💡 快速开始"这类标题里的表情符号换成线性图标，文字内容照旧。</li>
+                <li><b>不改事件接线</b>：上一轮的「确定重绘」等交互逻辑不受本次美化影响。</li>
+              </ul>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* 明暗 / 主色切换 */
+function bindSeg(id, attr){
+  const seg = document.getElementById(id);
+  seg.addEventListener('click', e => {
+    const b = e.target.closest('button'); if(!b) return;
+    [...seg.querySelectorAll('button')].forEach(x => x.setAttribute('aria-pressed', x === b));
+    document.documentElement.setAttribute(attr, b.dataset[attr]);
+  });
+}
+bindSeg('seg-theme','data-theme');
+bindSeg('seg-accent','data-accent');
+
+/* 页签 */
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    const group = t.closest('.panel');
+    group.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x === t));
+    group.querySelectorAll('.tabpanel').forEach(p =>
+      p.setAttribute('data-active', p.id === t.dataset.tab));
+  });
+});
+
+/* 折叠面板 */
+document.querySelectorAll('[data-acc]').forEach(b => {
+  b.addEventListener('click', () => {
+    const acc = b.closest('.acc');
+    acc.setAttribute('data-open', acc.getAttribute('data-open') !== 'true');
+  });
+});
+
+/* 滑块填充比例（演示用） */
+document.querySelectorAll('input[type=range]').forEach(r => {
+  const upd = () => {
+    const pct = (r.value - r.min) / (r.max - r.min) * 100;
+    r.style.setProperty('--pct', pct.toFixed(1) + '%');
+  };
+  upd(); r.addEventListener('input', upd);
+});
+
+/* 复选框演示：只联动两个色标输入框（不含"精确时刻"），体现"勾自动时忽略输入框" */
+document.querySelectorAll('.switch input').forEach(c => {
+  c.addEventListener('change', () => {
+    document.querySelectorAll('[data-crange] .input').forEach(i => {
+      i.style.opacity = c.checked ? .45 : 1;
+      i.readOnly = c.checked;
+    });
+  });
+  c.dispatchEvent(new Event('change'));
+});
+</script>
+</body>
+</html>
