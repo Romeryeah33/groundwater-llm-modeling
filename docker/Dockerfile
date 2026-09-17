@@ -1,50 +1,48 @@
-# Physical-LLM Groundwater Intelligent Modeling System
-# Docker 镜像 — 独立运行版
-FROM python:3.11-slim
+# ============================================================
+# 地下水智能建模系统 — Docker 镜像
+# 分发给其他用户使用，用户只需提供自己的 API Key
+#
+# 构建:   docker build -f docker/Dockerfile -t gw-modeling:v0.2.0 .
+# 运行:   docker run -p 7860:7860 -e LLM_API_KEY=your-key gw-modeling:v0.2.0
+# ============================================================
+FROM python:3.13-slim
 
 LABEL maintainer="luomoye@nies.org"
-LABEL description="物理约束嵌入LLM的地下水智能建模原型系统"
+LABEL version="v0.2.0"
+LABEL description="物理约束嵌入LLM的地下水智能建模系统"
 
-# 安装 MODFLOW 6 二进制文件
+# ── 系统依赖：MODFLOW 6 + GIS 库（geopandas/rasterio） ──
 ARG MODFLOW_VERSION=6.4.4
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget ca-certificates && \
+    wget ca-certificates unzip \
+    libgdal-dev gdal-bin \
+    && \
     wget -q https://github.com/MODFLOW-USGS/modflow6/releases/download/${MODFLOW_VERSION}/mf6_${MODFLOW_VERSION}_linux64.zip && \
     unzip mf6_${MODFLOW_VERSION}_linux64.zip -d /usr/local/bin/ && \
     chmod +x /usr/local/bin/mf6 && \
     rm mf6_${MODFLOW_VERSION}_linux64.zip && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 设置工作目录
 WORKDIR /app
 
-# 复制依赖清单
+# ── Python 依赖 ──
 COPY requirements.txt .
-
-# 安装 Python 依赖
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 复制应用代码
+# ── 应用代码 ──
 COPY . .
 
-# 初始化语义库
+# ── 初始化语义库 ──
 RUN python scripts/init_semantic_db.py
 
-# 创建输出目录
-RUN mkdir -p /app/data/outputs/workspaces /app/data/outputs/figures /app/data/outputs/reports
+# ── 数据与输出目录 ──
+RUN mkdir -p /app/data/outputs/workspaces /app/data/outputs/figures /app/data/outputs/reports /app/data/uploads /app/data/sessions
 
-# 暴露端口
-EXPOSE 7860 8000
+EXPOSE 7860
 
-# 环境变量
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONIOENCODING=utf-8
 ENV GRADIO_SERVER_NAME=0.0.0.0
-ENV GRADIO_ROOT_PATH=""
 
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860')" || exit 1
-
-# 默认启动 Gradio 前端
+# 默认启动 — 用户通过 -e 传入 LLM_API_KEY
 CMD ["python", "-m", "app.frontend.gradio_app"]
