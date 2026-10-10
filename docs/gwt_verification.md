@@ -247,9 +247,29 @@ ET_HCLOSE=1e-7 ET_WS=data/outputs/gwt_verify/t3 python scripts/verify_east_texas
    以及填埋场 RCH；实跑水头范围 212.03 ~ 215.0 m，**已有梯度驱动**，比早期"只有两个 GHB、
    无梯度驱动"好得多。但域内流速仍极低（约 0.02 m/d），15000 d 平流位移仅约 300 m，
    弥散占比偏高。这是 IR 的物理设计问题，靠改代码解决不了。
-2. **`vka` 单位未做校验**：`vka = {"value": 20, "unit": "m"}` 单位应是 m/d。建议在
-   `validator.py` 加"垂向渗透系数单位必须是 m/d"的检查。
-3. **`_build_gwt` 的初始浓度只支持单一常数**，真实案例常需"局部高浓度 + 背景浓度"分区。
+2. ~~**`vka` 单位未做校验**~~ —— **已解决（2026-10-10）**。
+   `UnitConsistencyConstraint.check_unit_consistency` 的 docstring 一直声称要检查
+   "流速/渗透系数：aquifer.hk, aquifer.vka"，函数体里却只有长度、时间两组。现已补上：
+   hk/vka 的单位必须带时间分母（m/d、ft/d、cm/s …），裸长度单位与无量纲记号报警。
+   同处一并修掉 `_check_physics` 里 hk/vka/porosity 三处
+   `params.get(k, {}).get("value")` 遇裸数字即抛 `AttributeError` 的崩溃。
+   回归：`tests/test_physics_engine.py` 测试 8/9。
+
+3. ~~**`_build_gwt` 的初始浓度只支持单一常数**~~ —— **经核对无实证需求，不改（2026-10-10）**。
+   查原始 MT3DMS 台面 `mt3dmap_1.out`：
+
+   ```text
+   INITIAL CONC.: COMP.  01 =   0.000000     FOR LAYER  1
+   INITIAL CONC.: COMP.  01 =   0.000000     FOR LAYER  2
+   ```
+
+   两层的初始浓度都是 **0**；`20000` 全部落在 `mt3dmap_1.ssm`（源项），已由
+   RCH + `AUXMIXED` 那条链路覆盖（见第 2 节）。所以"局部高浓度 + 背景浓度分区"
+   这一能力在当前案例上无需求，属于凭空增设的复杂度。若将来确有分区初始浓度的
+   案例再说 —— 且届时优先让 `initial_concentration` 直接接受数组（FloPy 的
+   `ModflowGwitic(strt=...)` 本就支持分层数组），而不是新造一套 geometry 解析。
+
+
 4. **MF6 版本倒挂**：flopy 3.10.0 的 dfn 面向比 6.3.0 更新的 MF6，传 6.3.0 不认识的关键字
    会被 `store_error(terminate=.TRUE.)` 硬终止（已知：ADV 的 `UTVD`、`ats_percel`）。
    升级到 MF6 6.5.x 是更彻底的解法。
