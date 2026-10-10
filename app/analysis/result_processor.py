@@ -8,7 +8,9 @@
 - 污染羽核心指标（面积、质心、迁移速率）
 """
 
+import re
 import logging
+from pathlib import Path
 from typing import Optional, List, Dict
 
 import numpy as np
@@ -181,74 +183,199 @@ class ResultProcessor:
     # 水量/质量平衡提取
     # ================================================================
 
+    # MODFLOW 6 在 .lst 里写出的全文水量平衡块标题与数值行
+    _BUDGET_HEADER = "VOLUME BUDGET FOR ENTIRE MODEL"
+    _ITEM_RE = re.compile(r"^\s*([A-Z][A-Z0-9\-]*)\s*=\s*([-\d.]+(?:[Ee][+-]?\d+)?)")
+    _NUM_RE = re.compile(r"[-\d.]+(?:[Ee][+-]?\d+)?")
+
     def extract_water_budget(self, gwf) -> dict:
         """
         提取水量平衡预算数据
 
+        优先解析 MODFLOW 6 自己写在 .lst 里的全文水量平衡块。理由是那份文本就是
+        MF6 计算的权威结果，连 PERCENT DISCREPANCY 都直接给出，不必自己再推一遍；
+        而且它不受 FloPy 版本差异影响 —— 本环境 flopy 3.10 读 .bud 得到的值与 .lst
+        对不上（例如 CHD 流量读成 -1.8e-13，.lst 里是 1.0e-2，见
+        `docs/gwt_verification.md` 第 5 节记录的「MF6 版本倒挂」）。
+        .lst 不可用时回退到读 .bud。
+
         Returns:
-            {inflow: {component: value}, outflow: {component: value}, balance_error: float}
+            {inflow: {component: value}, outflow: {component: value},
+             total_in: float, total_out: float, balance_error: float}
         """
         try:
+            from_lst = self._budget_from_lst(gwf)
+            if from_lst is not None:
+                return from_lst
+        except Exception as e:
+            logger.warning(f"从 .lst 解析水量平衡失败，回退到 .bud: {e}")
+        return self._budget_from_bud(gwf)
+
+    # ---- .lst 路径（首选） ----
+
+    @staticmethod
+    def _model_lst_path(gwf):
+        ws = getattr(gwf, "model_ws", None)
+        name = getattr(gwf, "name", None)
+        if not ws or not name:
+            return None
+        p = Path(ws) / f"{name}.lst"
+        return p if p.exists() else None
+
+    def _budget_from_lst(self, gwf) -> Optional[dict]:
+        """解析 .lst 末尾那个全文水量平衡块；拿不到就返回 None 交给回退路径。
+
+        块内每行形如
+            STO-SS =       13580.7451      STO-SS =    3.2740E-04   STORAGE
+        左列是累积量、右列是本步速率，两者各取**第一个**数（即累积量）。
+        """
+        p = self._model_lst_path(gwf)
+        if p is None:
+            return None
+        text = p.read_text(encoding="utf-8", errors="replace")
+
+        idx = text.rfind(self._BUDGET_HEADER)
+        if idx < 0:
+            return None
+
+        inflow, outflow = {}, {}
+        total_in = total_out = None
+        discrepancy = None
+        section = None
+
+        for line in text[idx:].splitlines()[:120]:
+            s = line.strip()
+            if not s:
+                continue
+            # 先认三种汇总行，再认 IN:/OUT: 段头，最后才认分量行
+            if s.startswith("TOTAL IN"):
+                nums = self._NUM_RE.findall(s)
+                if nums:
+                    total_in = float(nums[0])
+                continue
+            if s.startswith("TOTAL OUT"):
+                nums = self._NUM_RE.findall(s)
+                if nums:
+                    total_out = float(nums[0])
+                continue
+            if s.startswith("PERCENT DISCREPANCY"):
+                nums = self._NUM_RE.findall(s)
+                if nums:
+                    discrepancy = float(nums[0])
+                break
+            if s.startswith("IN:") and "=" not in s:
+                section = "in"
+                continue
+            if s.startswith("OUT:") and "=" not in s:
+                section = "out"
+                continue
+            if section is None or "=" not in s:
+                continue
+            m = self._ITEM_RE.match(line)
+            if not m:
+                continue
+            name, value = m.group(1), float(m.group(2))
+            bucket = inflow if section == "in" else outflow
+            bucket[name] = bucket.get(name, 0.0) + value
+
+        if total_in is None or total_out is None:
+            return None
+
+        if discrepancy is not None:
+            # .lst 给的是百分数（-0.01 表示 -0.01%）
+            error = abs(discrepancy) / 100.0
+        else:
+            error = (abs(total_in - total_out) / max(total_in, total_out, 1e-10)
+                     if total_in > 0 else 0.0)
+
+        return {
+            "inflow": inflow,
+            "outflow": outflow,
+            "total_in": total_in,
+            "total_out": total_out,
+            "balance_error": error,
+            "source": "lst",
+        }
+
+    # ---- .bud 路径（回退） ----
+
+    def _budget_from_bud(self, gwf) -> dict:
+        try:
             budget_obj = gwf.output.budget()
-
-            # FloPy 3.8+: get_data() 需要 kstpkper/totim/idx/text 参数
-            try:
-                kstpkper_list = budget_obj.get_kstpkper()
-            except AttributeError:
-                kstpkper_list = [(0, 0)]
-
-            inflow = {}
-            outflow = {}
-            total_in = 0.0
-            total_out = 0.0
-
-            for kpk in kstpkper_list:
-                try:
-                    records = budget_obj.get_data(kstpkper=kpk)
-                except Exception:
-                    # 回退: 尝试用 idx
-                    try:
-                        records = budget_obj.get_data(idx=0)
-                    except Exception:
-                        # 最后回退: 旧版 FloPy 无参数调用
-                        records = budget_obj.get_data()
-
-                if isinstance(records, np.ndarray):
-                    self._process_budget_records(records, inflow, outflow)
-                    total_in += sum(inflow.values())
-                    total_out += sum(outflow.values())
-                elif isinstance(records, list):
-                    for rec in records:
-                        if isinstance(rec, np.ndarray):
-                            self._process_budget_records(rec, inflow, outflow)
-                            total_in += sum(inflow.values())
-                            total_out += sum(outflow.values())
-
-            error = abs(total_in - total_out) / max(total_in, total_out, 1e-10) if total_in > 0 else 0.0
-
-            return {
-                "inflow": inflow,
-                "outflow": outflow,
-                "total_in": total_in,
-                "total_out": total_out,
-                "balance_error": error,
-            }
+            kstpkper_list = budget_obj.get_kstpkper()
         except Exception as e:
             logger.warning(f"水量平衡提取失败: {e}")
             return {"error": str(e)}
 
+        kpk = kstpkper_list[-1] if kstpkper_list else None
+        inflow, outflow = {}, {}
+
+        try:
+            try:
+                names = budget_obj.get_unique_record_names(decode=True)
+            except Exception:
+                names = None
+
+            if names:
+                for nm in names:
+                    recs = budget_obj.get_data(text=nm, kstpkper=kpk)
+                    self._accumulate(recs, str(nm).strip().upper(), inflow, outflow)
+            else:
+                # 拿不到记录名时只能整批取，退化成一个 UNKNOWN 项
+                self._accumulate(budget_obj.get_data(kstpkper=kpk),
+                                 "UNKNOWN", inflow, outflow)
+        except Exception as e:
+            logger.warning(f"水量平衡提取失败: {e}")
+            return {"error": str(e)}
+
+        total_in = sum(inflow.values())
+        total_out = sum(outflow.values())
+        error = (abs(total_in - total_out) / max(total_in, total_out, 1e-10)
+                 if total_in > 0 else 0.0)
+
+        return {
+            "inflow": inflow,
+            "outflow": outflow,
+            "total_in": total_in,
+            "total_out": total_out,
+            "balance_error": error,
+            "source": "bud",
+        }
+
     @staticmethod
-    def _process_budget_records(records: np.ndarray, inflow: dict, outflow: dict):
-        """处理单条预算记录，将流入/流出累加到对应字典"""
-        if not (isinstance(records, np.ndarray) and records.dtype.names):
+    def _flow_of(rec) -> Optional[float]:
+        """从一条预算记录里取出流量值。
+
+        MF6 的预算记录分两种，绝不能按 dtype.names 全量累加：
+          - 带命名字段（如 node/node2/q/CONCENTRATION）：**只有 `q` 是流量**。
+            node/node2 是格点索引，CONCENTRATION 是辅助浓度，qx/qy/qz 是分量。
+            全量累加时光 node 一项就是几万个索引之和，会把不平衡率撑到 100%。
+          - 不带命名字段（如 STO-SS、FLOW-JA-FACE）：整个数组就是流量。
+        """
+        if not isinstance(rec, np.ndarray):
+            return None
+        if rec.dtype.names:
+            if "q" not in rec.dtype.names:
+                return 0.0
+            return float(np.sum(rec["q"]))
+        try:
+            return float(np.sum(rec))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _accumulate(cls, records, name: str, inflow: dict, outflow: dict) -> None:
+        if records is None:
             return
-        for field in records.dtype.names:
-            q = np.sum(records[field])
-            component = field.replace("_", " ").title()
-            if q > 0:
-                inflow[component] = inflow.get(component, 0.0) + float(q)
-            elif q < 0:
-                outflow[component] = outflow.get(component, 0.0) + float(abs(q))
+        seq = records if isinstance(records, (list, tuple)) else [records]
+        for rec in seq:
+            v = cls._flow_of(rec)
+            if v is None:
+                continue
+            if v >= 0:
+                inflow[name] = inflow.get(name, 0.0) + v
+            else:
+                outflow[name] = outflow.get(name, 0.0) + abs(v)
 
     # ================================================================
     # 污染羽指标计算

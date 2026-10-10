@@ -188,6 +188,7 @@ t = 15000 d：污染格 2289 / 22454 = 10.19%（修复前是 100% 的全域毯�
 
 ```text
 tests/test_gwt_pipeline.py               52/52  通过   （46 → 52，+6 为 total_time 相关）
+tests/test_water_budget.py               23/23  通过   ← 本轮新增（水量平衡改由 .lst 权威解析）
 tests/test_source_zone.py                97/97  通过   ← 本轮新增（源区定位 + 方位/时间约定）
 tests/test_prompt_templates.py           52/52  通过   ← 本轮新增（模板能否 .format 渲染）
 tests/test_plume_visualization.py        76/76  通过   （65 → 76，+11 为"确定重绘"接线锁）
