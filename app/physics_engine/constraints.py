@@ -12,7 +12,7 @@
 import math
 import logging
 from enum import Enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, Tuple, List, Dict
 
 import numpy as np
@@ -457,17 +457,34 @@ class ParameterRangeConstraint:
                 return v.get("value")
             return v
 
+        def _emit(pname, pinfo, aqua_type):
+            """逐层序列要拆成多条检查结果。
+
+            否则 ``porosity=[0.3, 0.2]`` 会走 check_param 里
+            "无法转换为数值，跳过范围检查" 的 INFO 分支 —— 看起来检查过了，
+            实际**一个值都没查**。逐层参数是新支持，这里必须同批补上。
+            """
+            v = _unwrap(pinfo)
+            if v is None:
+                return
+            if isinstance(v, (list, tuple)):
+                for i, elem in enumerate(v, 1):
+                    if elem is None:
+                        continue
+                    res = self.check_param(pname, elem, aqua_type)
+                    # 用 dataclasses.replace 而不是就地改属性：参数名要带上层号，
+                    # 但范围查询仍必须按原始参数名（"porosity[层1]" 查不到表）。
+                    results.append(replace(res, param_name=f"{pname}[层{i}]"))
+            else:
+                results.append(self.check_param(pname, v, aqua_type))
+
         # 遍历 aquifer.parameters
         for pname, pinfo in json_ir.get("aquifer", {}).get("parameters", {}).items():
-            v = _unwrap(pinfo)
-            if v is not None:
-                results.append(self.check_param(pname, v, aqua_type))
+            _emit(pname, pinfo, aqua_type)
 
         # 遍历 transport.dispersion
         for pname, pinfo in json_ir.get("transport", {}).get("dispersion", {}).items():
-            v = _unwrap(pinfo)
-            if v is not None:
-                results.append(self.check_param(pname, v, aqua_type))
+            _emit(pname, pinfo, aqua_type)
 
         # 遍历 transport.reaction
         reaction = json_ir.get("transport", {}).get("reaction", {})

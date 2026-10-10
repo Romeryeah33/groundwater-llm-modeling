@@ -266,7 +266,7 @@ class ClosedLoopValidator:
             bcs = json_ir.get("boundary_conditions", [])
             gradient = self._estimate_gradient(bcs, L)
 
-            n = self._as_float(aqua_params.get("porosity"))
+            n = self._as_float_any(aqua_params.get("porosity"))
             if n is None:
                 n = 0.25
             issues.append(
@@ -280,7 +280,9 @@ class ClosedLoopValidator:
 
         # --- 溶质运移参数检查 ---
         if transport.get("enabled"):
-            al = transport.get("dispersion", {}).get("al", {}).get("value")
+            # 弥散度可能是逐层列表（[20, 20]）或裸数字 —— 用 _as_float_any 取
+            # 代表值，否则 Pe 数判据会拿 list 做除法。
+            al = self._as_float_any(transport.get("dispersion", {}).get("al"))
             delr = grid.get("delr")
             # 如果 delr 是数组则取平均
             if isinstance(delr, (list, type(None))) and delr is not None and len(delr) > 0:
@@ -396,6 +398,23 @@ class ClosedLoopValidator:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _as_float_any(v) -> Optional[float]:
+        """同 ``_as_float``，但**逐层序列取平均**而不是返回 None。
+
+        孔隙度、弥散度现在可以是 ``[0.3, 0.2]`` 这种逐层输入。达西流速与
+        Courant 数这类**筛查级**检查只需要一个代表值；若直接走 ``_as_float``
+        会返回 None，然后被静默替换成 0.25 默认值 —— 参数明明给了，
+        检查却在拿一个凭空的值在做，这比不检查更糟。
+        """
+        if isinstance(v, dict):
+            v = v.get("value")
+        if isinstance(v, (list, tuple, set)):
+            nums = [ClosedLoopValidator._as_float(x) for x in v]
+            nums = [x for x in nums if x is not None]
+            return sum(nums) / len(nums) if nums else None
+        return ClosedLoopValidator._as_float(v)
+
     def _estimate_gradient(self, bcs: list, L: float) -> float:
         """从边界条件估计水力梯度"""
         chd_heads = []
@@ -459,8 +478,16 @@ class ClosedLoopValidator:
 
         if period_data:
             aqua = json_ir.get("aquifer", {}).get("parameters", {})
-            hk = aqua.get("hk", {}).get("value", 1.0)
-            n = aqua.get("porosity", {}).get("value", 0.25)
+            # 用 _as_float_any 而不是 .get("value")：
+            #   1) hk/porosity 可能是裸数字而非 {"value":...} —— 直接 .get 会抛
+            #      AttributeError（本行此前就是这么一个坑）；
+            #   2) 逐层输入 [0.3, 0.2] 需要取一个代表值，否则 n 会是个 list。
+            hk = self._as_float_any(aqua.get("hk"))
+            if hk is None:
+                hk = 1.0
+            n = self._as_float_any(aqua.get("porosity"))
+            if n is None:
+                n = 0.25
 
             delr = grid.get("delr", 20)
             if isinstance(delr, (list, float)):

@@ -485,6 +485,9 @@ class FloPyModelMapper:
         al = _disp("al")
         if al is not None:
             result["al"] = al
+            # 记录来源。调用方（model_builder）据此决定要不要往界面推提示：
+            # 走默认值时用户以为自己给了值，实际没用上，必须看得见。
+            result["al_source"] = "ir"
         else:
             # 未指定时按网格尺度取默认值：αL ≈ 2Δx 使网格 Péclet 数 ≈ 0.5，
             # 落在数值稳定的安全侧。固定写 10 m 在粗网格（如 20 m 以上）
@@ -493,6 +496,7 @@ class FloPyModelMapper:
             delr = np.atleast_1d(np.asarray(self._unwrap_value(grid.get("delr"), 20.0), dtype=float))
             delc = np.atleast_1d(np.asarray(self._unwrap_value(grid.get("delc"), 20.0), dtype=float))
             result["al"] = max(10.0, 2.0 * max(float(delr.mean()), float(delc.mean())))
+            result["al_source"] = "grid_default"
             logger.warning(f"未指定纵向弥散度 al，按网格尺度取默认值 {result['al']:.2f} m")
 
         trpt = _disp("trpt")
@@ -550,6 +554,7 @@ class FloPyModelMapper:
         por = self._unwrap_value(transport.get("porosity"))
         if por is not None:
             result["porosity"] = por
+            result["porosity_source"] = "transport"
 
         # 初始浓度
         ic = self._unwrap_value(transport.get("initial_concentration"))

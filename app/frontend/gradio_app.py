@@ -292,15 +292,44 @@ def _extract_process_params(json_ir: dict) -> dict:
 
     缺项一律不填：ProcessIdentifier 自带默认值（al=10.0 / decay_rate=0.0 /
     kd=0.0 / porosity=0.25），取不到参数不该让整个流程报错。
+
+    两点注意：
+      1. ``al`` 实际写在 ``transport.dispersion.al``（不是 transport 顶层），
+         只读顶层会让它**每次都落到 al=10.0 的默认值** —— 参数明明给了，
+         过程贡献图却拿默认值在算。所以 dispersion 优先，顶层兜底。
+      2. ``al``/``porosity`` 现在可以是**逐层列表**（如 ``[0.3, 0.2]``）。
+         ProcessIdentifier 只需要一个代表值，取平均。
     """
     transport = json_ir.get("transport", {}) or {}
+    disp = transport.get("dispersion", {}) or {}
+
+    def _num(v):
+        if isinstance(v, dict):
+            v = v.get("value")
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, (list, tuple)):
+            nums = [_num(x) for x in v]
+            nums = [x for x in nums if x is not None]
+            return sum(nums) / len(nums) if nums else None
+        return None
+
     params = {}
     for key in ("al", "decay_rate", "kd", "porosity"):
-        val = transport.get(key)
-        if isinstance(val, dict):
-            val = val.get("value")
-        if isinstance(val, (int, float)):
-            params[key] = float(val)
+        val = _num(disp.get(key, transport.get(key)))
+        if val is not None:
+            params[key] = val
+
+    # 孔隙度常见写法是挂在 aquifer.parameters 下（MST 包也是从那儿兜底取的），
+    # transport 段取不到就再去那儿找 —— 否则过程贡献图用的是 0.25 默认值，
+    # 而模型实际用的是用户给的值，两张图对不上。
+    if "porosity" not in params:
+        aqua_por = (json_ir.get("aquifer", {}) or {}).get("parameters", {}).get("porosity")
+        val = _num(aqua_por)
+        if val is not None:
+            params["porosity"] = val
     return params
 
 
@@ -936,6 +965,40 @@ def _planned_duration_text(json_ir: dict) -> str:
     return "未给出（按默认 1 期 1 天）"
 
 
+def _effective_transport_text(build_result: dict) -> str:
+    """
+    把**实际写进 GWT MST/DSP 包**的运移参数摆到界面上，供用户与提示词对账。
+
+    为什么需要它：抽取链路可能把用户给的逐层孔隙度压成一个值、或让弥散度
+    停在上一轮的旧值上（East Texas 案例：提示词写 20 m，IR 里却是 40 m，
+    且标着 source=user_input）。此前这些值只写进 logger 与 .dsp/.mst 文件，
+    界面上**没有任何地方**能让人发现"我写的和它用的不是一回事"。
+    """
+    eff = (build_result or {}).get("transport_effective") or {}
+    if not eff:
+        return "未启用溶质运移"
+
+    def _fmt(v):
+        if isinstance(v, list):
+            return "逐层 " + "/".join(f"{x:g}" for x in v)
+        try:
+            return f"{float(v):g}"
+        except (TypeError, ValueError):
+            return str(v)
+
+    src = {"ir": "输入", "grid_default": "默认(网格尺度)",
+           "transport": "transport 段", "aquifer": "aquifer 段",
+           "default": "默认值"}.get(eff.get("al_source"), eff.get("al_source", "?"))
+
+    al = _fmt(eff.get("al"))
+    por = _fmt(eff.get("porosity"))
+    por_src = {"transport": "transport 段", "aquifer": "aquifer 段",
+               "default": "默认值 0.3"}.get(eff.get("porosity_source"), "?")
+    return (f"αL={al} m（{src}）｜n={por}（{por_src}）｜"
+            f"αTH/αL={eff.get('trpt')}，αTV/αL={eff.get('trpv')}，"
+            f"D*={eff.get('diffc')}")
+
+
 def _warning_card_html(val_result: dict) -> str:
     """
     把校验**警告**渲染成界面上可见的琥珀色卡片。
@@ -1206,6 +1269,7 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
                 map_html += telemetry([
                     ("水均衡误差", f"{_wb_err:.4f} %", _wb_tone),
                     ("计划模拟时长（来自 IR）", _planned_duration_text(json_ir), ""),
+                    ("运移参数（实际写入模型）", _effective_transport_text(result), ""),
                 ]) + warn_html
                 # 源区那一行是用户能亲眼看到的"修复生效"证据：取代了旧代码
                 # 那句到不了任何 UI 组件的 logger.info

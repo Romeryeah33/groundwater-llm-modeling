@@ -78,6 +78,36 @@ def _as_float(v, default=0.0):
         return float(default)
 
 
+def _to_layer_array(value, nlay: int, nrow: int, ncol: int, name: str):
+    """把「标量或逐层序列」归一化为 FloPy 可接受的标量 / (nlay,nrow,ncol) 数组。
+
+    用于 GWT 的 MST（孔隙度）与 DSP（弥散度）包。注意：**标量输入必须原样透传**，
+    不能统一展成数组 —— 展成数组会让 FloPy 写 ARRAY 而不是 CONSTANT，
+    等于改掉既有案例的基线（East Texas 等 46 条回归都建立在 CONSTANT 上）。
+
+    逐层序列的三种写法都收：
+      - ``[0.3, 0.2]``                    裸列表
+      - ``{"value": [0.3, 0.2], ...}``    LLM 常用的带单位包装
+      - ``[[0.3], [0.2]]``                只给一列的嵌套列表
+
+    长度必须等于 ``nlay``（长度为 1 时按全场同一值处理，退化为标量）。
+    """
+    if isinstance(value, dict):
+        value = value.get("value")
+    if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, bool):
+        return float(value)
+
+    seq = np.asarray(value, dtype=float).ravel()
+    if seq.size == 1:
+        return float(seq[0])
+    if seq.size != nlay:
+        raise ValueError(
+            f"{name} 给出了 {seq.size} 个值，与模型层数 nlay={nlay} 不一致；"
+            f"要么给单个全场值，要么给恰好 {nlay} 个逐层值"
+        )
+    return np.broadcast_to(seq.reshape(nlay, 1, 1), (nlay, nrow, ncol)).copy()
+
+
 def _resolve_botm(grid: dict) -> list:
     """把各种形态的 bottom/botm 归一化为长度恰好为 nlay 的列表。
 
@@ -180,6 +210,8 @@ class AutoModelBuilder:
         # 用户只看到结果不对、看不到原因。这里攒起来，由 `build_and_run`
         # 的返回值带出去，前端渲染到结果面板。
         self._build_warnings: List[str] = []
+        # 实际写进 GWT MST/DSP 包的运移参数（含来源），供界面核对
+        self._effective_transport: Optional[dict] = None
 
     # ================================================================
     # 主入口：一键构建完整模拟
@@ -227,6 +259,7 @@ class AutoModelBuilder:
         self._built_pkgs = {}
         self._transport_degraded = False
         self._build_warnings = []
+        self._effective_transport = None
         logger.info(
             f"DIS 归一化: nlay={self._dis['nlay']}, nrow={self._dis['nrow']}, "
             f"ncol={self._dis['ncol']}, top={self._dis['top']:g}, botm={self._dis['botm']}"
@@ -569,6 +602,12 @@ class AutoModelBuilder:
         ne = (mapped.get("transport", {}) or {}).get("porosity")
         if ne is None:
             ne = aqua.get("porosity")
+        # 逐层输入时取**最小值**：v = K·i/ne，孔隙度越小流速越大，
+        # 取最小孔隙度得到的是最保守（最大）的参考流速，反推出的 Δt 最小。
+        # 直接用 float() 转换会在列表上抛 TypeError，被下面的兜底静默成 0.25。
+        if isinstance(ne, (list, tuple)):
+            _nums = [float(x) for x in ne if isinstance(x, (int, float))]
+            ne = min(_nums) if _nums else None
         try:
             ne = float(ne) if ne is not None else 0.25
         except (TypeError, ValueError):
@@ -944,19 +983,32 @@ class AutoModelBuilder:
 
         # MST: 移动存储与转化包（MODFLOW 6 GWT 必选，缺了会直接报
         # "Mass storage and transfer (MST6) package not specified"）
-        # 孔隙度优先从 transport 取，其次从 aquifer 取，否则默认 0.3
+        # 孔隙度优先从 transport 取，其次从 aquifer 取，否则默认 0.3。
+        # 支持逐层输入（提示词里逐层给孔隙度时不再被压成一个值）。
+        nlay, nrow, ncol = dis["nlay"], dis["nrow"], dis["ncol"]
         porosity = transport.get("porosity") or mapped.get("aquifer", {}).get("porosity")
         if porosity is None:
             porosity = 0.3
             logger.warning("未指定孔隙度，GWT MST 使用默认值 0.3")
-        porosity = float(porosity)
-        if not 0.0 < porosity <= 1.0:
-            raise ValueError(f"孔隙度必须在 (0, 1] 区间内，当前为 {porosity}")
+        porosity = _to_layer_array(porosity, nlay, nrow, ncol, "孔隙度")
+        por_min = float(np.min(porosity))
+        por_max = float(np.max(porosity))
+        por_src = transport.get("porosity_source") or (
+            "aquifer" if mapped.get("aquifer", {}).get("porosity") is not None else "default")
+        if not (0.0 < por_min and por_max <= 1.0):
+            raise ValueError(
+                f"孔隙度必须在 (0, 1] 区间内，当前范围为 [{por_min}, {por_max}]"
+            )
         flopy.mf6.ModflowGwtmst(gwt, porosity=porosity)
-        logger.info(f"GWT MST 孔隙度: {porosity}")
+        if np.ndim(porosity) == 0:
+            logger.info(f"GWT MST 孔隙度: {porosity}（全场常数）")
+        else:
+            per_layer = np.asarray(porosity)[:, 0, 0]
+            logger.info(f"GWT MST 孔隙度: 逐层 {list(np.round(per_layer, 4))}")
 
-        # DSP: 弥散包
-        al = transport.get("al", 10.0)
+        # DSP: 弥散包。与孔隙度同理，支持逐层输入；
+        # 标量与逐层可以混着来（如 al 逐层、trpt 全场），靠 numpy 广播。
+        al = _to_layer_array(transport.get("al", 10.0), nlay, nrow, ncol, "纵向弥散度 al")
         trpt = transport.get("trpt", 0.1)
         trpv = transport.get("trpv", 0.01)
         diffc = transport.get("diffc", 1e-9)
@@ -968,6 +1020,42 @@ class AutoModelBuilder:
             atv=al * trpv,
             diffc=diffc,
         )
+        if np.ndim(al) == 0:
+            logger.info(
+                f"GWT DSP: al={al}, ath1={float(np.asarray(al * trpt))}, "
+                f"atv={float(np.asarray(al * trpv))}, diffc={diffc}（全场常数）"
+            )
+        else:
+            logger.info(
+                f"GWT DSP: 逐层 al={list(np.round(np.asarray(al)[:, 0, 0], 4))}, "
+                f"trpt={trpt}, trpv={trpv}, diffc={diffc}"
+            )
+
+        # 实际生效的运移参数 —— 由 build_and_run 带回界面。
+        # 用户改过提示词却拿到旧值时，这是唯一能当场对上的地方
+        # （East Texas 案例：提示词写 20 m，IR 里却是 40 m）。
+        def _lay(v):
+            return list(np.round(np.asarray(v, dtype=float)[:, 0, 0], 4)) \
+                if np.ndim(v) > 0 else float(v)
+
+        self._effective_transport = {
+            "al": _lay(al), "al_source": transport.get("al_source", "unknown"),
+            "trpt": _lay(_to_layer_array(trpt, nlay, nrow, ncol, "trpt"))
+            if isinstance(trpt, (list, tuple)) else trpt,
+            "trpv": _lay(_to_layer_array(trpv, nlay, nrow, ncol, "trpv"))
+            if isinstance(trpv, (list, tuple)) else trpv,
+            "diffc": _lay(diffc) if isinstance(diffc, (list, tuple)) else diffc,
+            "porosity": _lay(porosity), "porosity_source": por_src,
+        }
+
+        # 走网格尺度默认值时**必须**让用户看见：提示词里写了弥散度却落进这条
+        # 分支，说明抽取链路把它丢了，用户拿到的不是自己给的值。
+        if transport.get("al_source") == "grid_default":
+            self._warn(
+                f"纵向弥散度 al 未从输入中取到，已按网格尺度取默认值 "
+                f"{_lay(al)} m（αL≈2Δx，使网格 Péclet 数≈0.5）。"
+                f"若这不是你想要的，请在提示词中明确写出纵向弥散度的数值。"
+            )
 
         # SSM: 源汇项浓度注入
         #
@@ -1163,6 +1251,8 @@ class AutoModelBuilder:
             "transport_degraded": self._transport_degraded,
             # 构建期攒下的、用户应当看见的提示（原先只有 logger，到不了界面）
             "build_warnings": list(self._build_warnings),
+            # 实际写进 MST/DSP 的运移参数与来源，供界面逐项核对
+            "transport_effective": self._effective_transport,
             "sim": sim,
             "gwf": self._gwf,
             "gwt": self._gwt,

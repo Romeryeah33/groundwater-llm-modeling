@@ -53,12 +53,25 @@ class ProcessIdentifier:
 
         n_times = len(conc_history)
 
-        # 提取参数
-        al = parameters.get("al", 10.0)
-        decay_rate = parameters.get("decay_rate", 0.0)
-        kd = parameters.get("kd", 0.0)
-        porosity = parameters.get("porosity", 0.25)
-        rho_bulk = parameters.get("rho_bulk", 1.7)
+        # 提取参数。
+        # 逐层输入（如 porosity=[0.3, 0.2]）在这里取平均作为代表值 ——
+        # 下面的迟滞因子要拿它做 max(porosity, 0.01)，传列表会直接抛。
+        def _num(v, default):
+            if isinstance(v, dict):
+                v = v.get("value")
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return float(v)
+            if isinstance(v, (list, tuple)):
+                nums = [_num(x, None) for x in v]
+                nums = [x for x in nums if x is not None]
+                return sum(nums) / len(nums) if nums else default
+            return default
+
+        al = _num(parameters.get("al"), 10.0)
+        decay_rate = _num(parameters.get("decay_rate"), 0.0)
+        kd = _num(parameters.get("kd"), 0.0)
+        porosity = _num(parameters.get("porosity"), 0.25)
+        rho_bulk = _num(parameters.get("rho_bulk"), 1.7)
 
         # 计算平均通量
         adv_fluxes = []

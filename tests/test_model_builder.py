@@ -144,13 +144,30 @@ _MIN_GWT_IR = {
 }
 
 # 5a. 降级：启用运移但无浓度源、初始浓度也为 0 → 浓度场恒为 0
+#
+# 同时锁住"al 走网格尺度默认值"这条新提示：_MIN_GWT_IR **没有**给 al，
+# 所以它必须出现。此前这条只在 logger 里，用户以为自己在提示词里写了
+# 弥散度、实际拿到的却是 2Δx（East Texas 案例的真实翻车点）。
 with tempfile.TemporaryDirectory() as _td:
     _b1 = AutoModelBuilder(_td)
     _b1.build_simulation(_MIN_GWT_IR, "warn_probe")
     assert _b1._transport_degraded, "应置 transport_degraded"
-    assert len(_b1._build_warnings) == 1, f"应恰好一条提示，得到 {_b1._build_warnings}"
-    assert "浓度场将恒为 0" in _b1._build_warnings[0]
-print(f"   OK: 无浓度源降级提示已捕获（{len(_b1._build_warnings)} 条）")
+    assert len(_b1._build_warnings) == 2, f"应恰好两条提示，得到 {_b1._build_warnings}"
+    assert any("浓度场将恒为 0" in w for w in _b1._build_warnings), _b1._build_warnings
+    assert any("纵向弥散度 al 未从输入中取到" in w for w in _b1._build_warnings), \
+        f"未给 al 时必须提示走了默认值，得到 {_b1._build_warnings}"
+print(f"   OK: 无浓度源降级 + al 默认值提示均已捕获（{len(_b1._build_warnings)} 条）")
+
+# 5a'. 给了 al 就不该再喊那条默认值提示（否则是另一种"狼来了"）
+with tempfile.TemporaryDirectory() as _td:
+    _b1b = AutoModelBuilder(_td)
+    _b1b.build_simulation(
+        {**_MIN_GWT_IR, "transport": {**_MIN_GWT_IR["transport"], "al": 20.0}},
+        "warn_probe_al",
+    )
+    assert not any("纵向弥散度 al 未从输入中取到" in w for w in _b1b._build_warnings), \
+        f"显式给了 al 不应再提示默认值，得到 {_b1b._build_warnings}"
+print("   OK: 显式给出 al 时不产生默认值提示")
 
 # 5b. 标量应力期 + 逐格浓度共存 → 必须展开为全网格，且**必须说出来**
 with tempfile.TemporaryDirectory() as _td:
