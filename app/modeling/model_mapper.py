@@ -165,7 +165,10 @@ class FloPyModelMapper:
         # 各向异性: hani = Kh/Kv, 因此 Kv = Kh / hani
         hani_v = self._unwrap_value(params.get("hani"))
         if hani_v is not None and vka_v is not None:
-            # 如果已独立指定 vka 则优先使用 vka
+            # 两个都给定时 vka 优先，hani 被忽略。此处刻意不抛不喊 ——
+            # 映射器是纯 IR→dict 变换，没有反馈通道；"谁被忽略、差多少"由
+            # ClosedLoopValidator._check_physics 的 anisotropy_conflict 警告
+            # 报给用户（那条能进界面）。
             pass
         elif hani_v is not None and hk_v is not None:
             result["vka"] = hk_v / hani_v

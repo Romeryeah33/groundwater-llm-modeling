@@ -8,6 +8,8 @@ if sys.platform == "win32":
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
+import tempfile
+
 import numpy as np
 from app.modeling.grid_generator import AutoGridGenerator
 from app.modeling.model_mapper import FloPyModelMapper
@@ -99,8 +101,9 @@ workspace = Path(__file__).parent.parent / "data" / "outputs" / "e2e_test"
 workspace.mkdir(parents=True, exist_ok=True)
 builder = AutoModelBuilder(str(workspace))
 
+build_result = None
 try:
-    result = builder.build_and_run(TEST_IR, "e2e_test")
+    result = build_result = builder.build_and_run(TEST_IR, "e2e_test")
     if result["success"]:
         print(f"   OK: Head range = {result['head_range']} m")
         print(f"   Output: {result['output_path']}")
@@ -109,6 +112,13 @@ try:
 except Exception as e:
     print(f"   WARNING: Build/run failed: {e}")
     # This is OK - means MODFLOW ran but may have issues with the model setup
+
+# 契约锁（放在 try 之外，否则断言会被上面的 except 吞掉）：
+# 返回值必须带 build_warnings，前端靠它把"建模提示"渲染到结果面板
+if build_result is not None:
+    assert "build_warnings" in build_result, \
+        "build_and_run 返回值必须带 build_warnings（前端结果面板的数据源）"
+    print(f"   OK: build_warnings 随返回值带出（{len(build_result['build_warnings'])} 条）")
 
 # 4. Solver Monitor
 print("\n4. Solver Monitor...")
@@ -121,6 +131,48 @@ assert sm._classify_error("did not converge", {}) == ErrorType.NON_CONVERGENCE
 assert sm._classify_error("cell went dry", {}) == ErrorType.DRY_CELLS
 assert sm._classify_error("negative concentration detected", {}) == ErrorType.NEGATIVE_CONCENTRATION
 print("   OK: Error classification works")
+
+# 5. 构建期提示必须能被用户看见（原先只有 logger.warning，到不了界面）
+print("\n5. Build warnings reach the result dict...")
+
+_MIN_GWT_IR = {
+    "aquifer": {"hk": 1.004, "porosity": 0.25},
+    "transport": {"porosity": 0.25, "enabled": True},
+    "boundaries": {"chd": {"0": [[[0, 0, 0], 1.0], [[0, 0, 499], 0.0]]}},
+    "grid": {"nrow": 2, "ncol": 10, "nlay": 1, "delr": 20, "delc": 20},
+    "domain": {"units": "m"},
+}
+
+# 5a. 降级：启用运移但无浓度源、初始浓度也为 0 → 浓度场恒为 0
+with tempfile.TemporaryDirectory() as _td:
+    _b1 = AutoModelBuilder(_td)
+    _b1.build_simulation(_MIN_GWT_IR, "warn_probe")
+    assert _b1._transport_degraded, "应置 transport_degraded"
+    assert len(_b1._build_warnings) == 1, f"应恰好一条提示，得到 {_b1._build_warnings}"
+    assert "浓度场将恒为 0" in _b1._build_warnings[0]
+print(f"   OK: 无浓度源降级提示已捕获（{len(_b1._build_warnings)} 条）")
+
+# 5b. 标量应力期 + 逐格浓度共存 → 必须展开为全网格，且**必须说出来**
+with tempfile.TemporaryDirectory() as _td:
+    _b2 = AutoModelBuilder(_td)
+    _spd, _hc = _b2._normalize_boundary_spd(
+        "rch", {0: 1e-4, 1: [[(0, 0, 0), 1e-4, 500.0]]},
+        base=1, nrow=3, ncol=4)
+    assert _hc, "含浓度列时 has_conc 应为 True"
+    assert len(_spd[0]) == 12, f"标量期应展开为 3×4=12 格，得到 {len(_spd[0])}"
+    assert _spd[0][0] == ((0, 0, 0), 1e-4, 0.0), f"展开后浓度应为 0，得到 {_spd[0][0]}"
+    assert len(_b2._build_warnings) == 1, "全域展开必须留下提示"
+    assert "展开为 layer0 全网格" in _b2._build_warnings[0]
+print(f"   OK: 全网格展开提示已捕获：{_b2._build_warnings[0][:48]}…")
+
+# 5c. 变异对照：不含浓度时**不展开也不报警**（否则提示会变成噪音）
+with tempfile.TemporaryDirectory() as _td:
+    _b3 = AutoModelBuilder(_td)
+    _spd3, _hc3 = _b3._normalize_boundary_spd(
+        "rch", {0: 1e-4, 1: [[(0, 0, 0), 1e-4]]}, base=1, nrow=3, ncol=4)
+    assert not _hc3 and _b3._build_warnings == [], "无浓度时不应展开/报警"
+    assert _spd3.get(0) == 1e-4, f"标量期应原样保留，得到 {_spd3.get(0)}"
+print("   OK: 无浓度时不展开、不报警（标量原样保留）")
 
 print("\n" + "=" * 60)
 print("All FloPy auto-modeling tests passed!")

@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import numpy as np
 import flopy
@@ -170,10 +170,24 @@ class AutoModelBuilder:
         self._built_pkgs = {}
         # 溶质运移已启用但没有任何浓度源时置位，供前端提示
         self._transport_degraded = False
+        # 建模拟过程中产生的、用户应当看见的提示。**不能只写 logger** ——
+        # 早先几处 `logger.warning`（全域展开、无浓度源降级）都到不了界面，
+        # 用户只看到结果不对、看不到原因。这里攒起来，由 `build_and_run`
+        # 的返回值带出去，前端渲染到结果面板。
+        self._build_warnings: List[str] = []
 
     # ================================================================
     # 主入口：一键构建完整模拟
     # ================================================================
+
+    def _warn(self, msg: str) -> None:
+        """记录一条**用户应当看见**的构建提示。
+
+        与裸 `logger.warning` 的区别是这个会随 `build_and_run` 的返回值流到
+        前端结果面板。凡是"用户不改就得不到预期模型"的提示都该走这里。
+        """
+        self._build_warnings.append(msg)
+        logger.warning(msg)
 
     def build_simulation(self, json_ir: dict, sim_name: str = "auto_model") -> MFSimulation:
         """
@@ -204,6 +218,7 @@ class AutoModelBuilder:
         self._ssm_sources = []
         self._built_pkgs = {}
         self._transport_degraded = False
+        self._build_warnings = []
         logger.info(
             f"DIS 归一化: nlay={self._dis['nlay']}, nrow={self._dis['nrow']}, "
             f"ncol={self._dis['ncol']}, top={self._dis['top']:g}, botm={self._dis['botm']}"
@@ -759,8 +774,7 @@ class AutoModelBuilder:
 
         return ssm_sources
 
-    @staticmethod
-    def _normalize_boundary_spd(pkg_name, sp_data, base, nrow, ncol):
+    def _normalize_boundary_spd(self, pkg_name, sp_data, base, nrow, ncol):
         """把边界记录统一成 ``(cellid, *values[, conc])`` 形式并补齐浓度列
 
         记录有两种写法：嵌套的 ``[(l,r,c), v...]`` 与扁平的 ``(l,r,c,v...)``
@@ -802,10 +816,15 @@ class AutoModelBuilder:
 
         if has_conc and scalar_periods:
             # 声明 AUXILIARY 后就不能再用均匀标量形式（MF6 按 naux 列数读列表），
-            # 把标量应力期展开成 layer0 全网格
-            logger.warning(
-                f"{pkg_name.upper()} 同时存在均匀补给与逐格浓度记录，"
-                f"已将 {len(scalar_periods)} 个均匀应力期展开为 layer0 全网格"
+            # 把标量应力期展开成 layer0 全网格。展开本身是**语义等价**的
+            # ——标量补给按定义就是全域均匀——但格数会从 1 变成 nrow×ncol，
+            # 且这些格子带的是浓度 0（标量形式本就没有浓度），用户必须知道，
+            # 否则会以为"只在一个期加了浓度，怎么整个域都在补给"。
+            self._warn(
+                f"{pkg_name.upper()} 同时存在均匀补给（标量）与逐格浓度记录："
+                f"MF6 声明 AUXILIARY 后不能再混用标量形式，已将 "
+                f"{len(scalar_periods)} 个均匀应力期展开为 layer0 全网格"
+                f"（{nrow}×{ncol} 格），展开后的浓度取 0。"
             )
             for per, rate in scalar_periods.items():
                 parsed[per] = [
@@ -921,7 +940,7 @@ class AutoModelBuilder:
         init_conc = ic_conc if isinstance(ic_conc, (int, float)) else 0.0
         if not sources and not init_conc:
             self._transport_degraded = True
-            logger.error(
+            self._warn(
                 "溶质运移已启用，但既没有浓度源、初始浓度也为 0，浓度场将恒为 0。"
                 "请在边界条件（RCH/WEL/CHD 等）中指定注入浓度。"
                 + self._source_concentration_hint()
@@ -1065,6 +1084,8 @@ class AutoModelBuilder:
                 "success": False,
                 "error": "模拟运行失败",
                 "detail": self._extract_error_report(self.workspace / sim_name / "mfsim.lst"),
+                # 失败前攒下的提示照样带出去：很可能正是其中一条解释了失败原因
+                "build_warnings": list(self._build_warnings),
             }
 
         # 读取结果
@@ -1079,6 +1100,8 @@ class AutoModelBuilder:
             "head_range": head_range,
             "output_path": str(self.workspace / sim_name),
             "transport_degraded": self._transport_degraded,
+            # 构建期攒下的、用户应当看见的提示（原先只有 logger，到不了界面）
+            "build_warnings": list(self._build_warnings),
             "sim": sim,
             "gwf": self._gwf,
             "gwt": self._gwt,

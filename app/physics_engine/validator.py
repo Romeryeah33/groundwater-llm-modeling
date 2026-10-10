@@ -254,14 +254,10 @@ class ClosedLoopValidator:
         transport = json_ir.get("transport", {})
 
         # --- 达西流速检查 ---
-        hk = aqua_params.get("hk", {}).get("value")
-        # 安全转换：跳过非数值的 hk（如 LLM 误填的字符串）
-        if isinstance(hk, str):
-            try:
-                hk = float(hk)
-            except (ValueError, TypeError):
-                hk = None
-        if hk is not None and isinstance(hk, (int, float)) and not isinstance(hk, bool):
+        # 用 _as_float 统一解包：裸数字 / {"value":…} / 字符串都能吃下，
+        # 与下方 vka 走同一条路径（直接 .get("value") 遇裸数字会抛 AttributeError）
+        hk = self._as_float(aqua_params.get("hk"))
+        if hk is not None:
             xr = domain.get("x_range", [0, 1])
             yr = domain.get("y_range", [0, 1])
             L = max(xr[1] - xr[0], yr[1] - yr[0], 1)
@@ -270,7 +266,9 @@ class ClosedLoopValidator:
             bcs = json_ir.get("boundary_conditions", [])
             gradient = self._estimate_gradient(bcs, L)
 
-            n = aqua_params.get("porosity", {}).get("value", 0.25)
+            n = self._as_float(aqua_params.get("porosity"))
+            if n is None:
+                n = 0.25
             issues.append(
                 GoverningEquationConstraint.check_darcy_velocity(hk, gradient, n)
             )
@@ -348,7 +346,8 @@ class ClosedLoopValidator:
                 ))
 
         # --- 各向异性比检查 ---
-        vka = aqua_params.get("vka", {}).get("value")
+        # 宽松取数：vka 可能是 {"value":…} 也可能是裸数字，直接 .get 会抛 AttributeError
+        vka = self._as_float(aqua_params.get("vka"))
         if hk is not None and vka is not None:
             ratio = hk / max(vka, 1e-10)
             if ratio < 1:
@@ -359,6 +358,29 @@ class ClosedLoopValidator:
                     description=f"Kh/Kv = {ratio:.2f} < 1（垂向渗透系数大于水平），不常见",
                     suggestion="通常 Kh ≥ Kv，请检查渗透系数设置",
                 ))
+
+        # --- hani 与 vka 同时给出 ---
+        # `map_aquifer_params` 在两个都给定时一律采用 vka，另一支是裸 `pass` ——
+        # 原先完全无声。用户改了 hani 却发现结果没变，只会以为参数没生效。
+        hani = self._as_float(aqua_params.get("hani"))
+        if hani is not None and vka is not None:
+            msg = f"同时给出了 hani={hani} 与 vka={vka} m/d"
+            if hk is not None and hani > 0:
+                kv_from_hani = hk / hani
+                rel = abs(kv_from_hani - vka) / max(abs(vka), 1e-10)
+                msg += f"；由 hani 推得 Kv = {kv_from_hani:.4g} m/d"
+                if rel > 0.1:
+                    msg += f"，与 vka 相差 {rel * 100:.0f}%"
+            issues.append(ConstraintResult(
+                constraint_type="physics",
+                param_name="anisotropy_conflict",
+                is_valid=False,
+                severity=ConstraintSeverity.WARNING,
+                current_value=vka,
+                description=f"{msg}。实际采用 vka，hani 被忽略",
+                suggestion=("二者重复，只会生效一个：想按各向异性比给就删掉 vka，"
+                            "想直接给垂向渗透系数就删掉 hani"),
+            ))
 
         return issues
 

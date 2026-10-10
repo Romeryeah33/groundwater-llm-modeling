@@ -600,7 +600,53 @@ class UnitConsistencyConstraint:
                         suggestion="传导系数应包含 /d 量纲",
                     ))
 
+        # 检查渗透系数的量纲（hk/vka 必须是「长度/时间」，不能是裸长度）
+        aquifer_params = json_ir.get("aquifer", {}).get("parameters", {})
+        if not isinstance(aquifer_params, dict):
+            aquifer_params = {}
+        for pname in ("hk", "vka"):
+            info = aquifer_params.get(pname)
+            if not (isinstance(info, dict) and info.get("unit")):
+                continue
+            cu = str(info["unit"]).strip()
+            if self._is_velocity_unit(cu):
+                continue
+            results.append(ConstraintResult(
+                constraint_type="unit_consistency",
+                param_name=f"aquifer.parameters.{pname}",
+                is_valid=False,
+                severity=ConstraintSeverity.WARNING,
+                current_value=info.get("value"),
+                unit=f"{cu} (期望: m/d)",
+                description=(f"渗透系数 {pname} 的单位写作「{cu}」，"
+                             f"但渗透系数是流速量纲（长度/时间），应为 m/d"),
+                suggestion=("补上时间分母写成 m/d。写成裸长度单位（如 m）会让 "
+                            "20 m 与 20 m/d 混为一谈，数值含义差一个时间维度"),
+            ))
+
         return results
+
+    @staticmethod
+    def _is_velocity_unit(unit: str) -> bool:
+        """判断单位是否为「长度/时间」量纲（m/d、ft/d、cm/s …）。
+
+        只认带时间分母的写法。裸长度单位（m、ft、cm）与无量纲记号一律判否 ——
+        前者正是 `vka = {"value": 20, "unit": "m"}` 这类漏写时间维度的情形。
+        """
+        u = str(unit).strip().lower().replace(" ", "").rstrip(".")
+        if "/" not in u:
+            return False
+        denom = u.rsplit("/", 1)[-1]
+        return denom in UnitConsistencyConstraint.TIME_UNIT_TOKENS
+
+    # 可接受的时间分母（与 STANDARD_UNITS 的 time=d 兼容的各写法）
+    TIME_UNIT_TOKENS = {
+        "d", "day", "days",
+        "s", "sec", "secs", "second", "seconds",
+        "hr", "hrs", "h", "hour", "hours",
+        "yr", "yrs", "year", "years",
+        "min", "mins", "minute", "minutes",
+    }
 
     def get_recommend_units(self, param_name: str) -> str:
         """获取参数推荐的标准单位"""

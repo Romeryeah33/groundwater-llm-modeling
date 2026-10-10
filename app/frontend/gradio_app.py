@@ -1213,6 +1213,16 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
                     map_html += callout("ok", "源区定位",
                                         "".join(f"<div>{r}</div>" for r in source_zone_rows))
 
+                # 构建期提示：原先这些只写 logger，用户根本看不到 ——
+                # 例如"标量应力期被展开成全网格"、"溶质运移已启用但没有任何
+                # 浓度源，浓度场将恒为 0"。这几条不改就得不到预期结果，
+                # 必须落在用户看得见的地方。
+                _build_warns = result.get("build_warnings") or []
+                if _build_warns:
+                    map_html += callout(
+                        "warn", f"建模提示（{len(_build_warns)} 条，不阻断）",
+                        "".join(f"<div>{w}</div>" for w in _build_warns))
+
                 if gwt:
                     try:
                         # 真实模拟总时长直接读 .ucn 的最后一个时刻。
