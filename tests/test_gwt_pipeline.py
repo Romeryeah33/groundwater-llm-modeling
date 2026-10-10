@@ -409,7 +409,7 @@ else:
               check_case_b(_res, _ws / "auto_model"),
               "MST6/网格一致/AUX/AUXMIXED/注入量/质量平衡未达标")
 
-    # ── Case C（East Texas）：103×218×2 跑满 15000 d，约 4 分钟，
+    # ── Case C（East Texas）：94×198×2 跑满 15000 d，约 4 分钟，
     #    默认不跑；设 RUN_CASE_C=1 启用。
     #    负浓度按 docs/gwt_verification.md 记录的容差判定（|C_min| ≤ 源浓度 0.1%）
     if os.environ.get("RUN_CASE_C") == "1":

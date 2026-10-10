@@ -86,9 +86,13 @@ def warn_extent_mismatch(model_extent: list, shp_bounds: Optional[list], log=Non
     """
     模型域与 SHP 外框不吻合时明确告警：底图会偏，不静默。
 
-    East Texas 案例实测：模型域 4360×2060 m，SHP 外框 3960×1871 m，两个方向都差
-    10.1%。这是**既有**问题（根因是 ``domain.x_range/y_range`` 与已有 nrow/ncol 的
-    网格互不相关），不在本轮修；但绝不能悄悄吞掉。
+    这个告警原本来自 East Texas 案例：当时模型域 4360×2060 m、SHP 外框
+    3960×1871 m，两个方向都差 10.1%，根因是 ``domain.x_range/y_range`` 与已有
+    nrow/ncol 的网格互不相关。该根因已由
+    ``AutoModelBuilder._reconcile_grid_with_domain`` 修掉（domain 定范围、
+    delr/delc 定分辨率），两者现在同源、不再漂移。保留本函数仍是有意义的：
+    它拦的是**另一种**情形 —— 域的声明值对不上实际加载的 SHP 外框（例如用户
+    换了底图却没更新 domain），那仍然会让底图偏移，仍然该被说出来而不是吞掉。
 
     Args:
         log: 用哪个 logger 发这条告警。缺省用本模块的。调用方（如

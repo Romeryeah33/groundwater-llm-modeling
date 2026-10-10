@@ -5,6 +5,7 @@ FloPy 全自动模型构建器
 处理流程：网格生成 → Sim创建 → GWF → (可选)GWT → 求解器 → 写入
 """
 
+import math
 import os
 import shutil
 import subprocess
@@ -25,6 +26,10 @@ logger = logging.getLogger(__name__)
 # SSM 辅助变量名。必须全大写，且水流包与 SSM 包的声明要完全一致
 # —— MF6 的 gwt1ssm1.f90 用全等比较查找该辅助变量。
 AUX_CONC = "CONCENTRATION"
+
+# 默认单元尺寸（m）。与 model_mapper.map_grid 里 delr/delc 的缺省值必须一致，
+# 否则"域范围 → 网格尺寸"的重算会与映射器实际展开的宽度分叉。
+DEFAULT_CELL_SIZE = 20.0
 
 # 边界类型 → MODFLOW 6 水流包名（SSM 的 pname 需与此一致）
 BOUNDARY_PKG_NAME = {
@@ -198,6 +203,9 @@ class AutoModelBuilder:
         """
         logger.info(f"开始构建模型: {sim_name}")
         self._json_ir = json_ir
+
+        # Step 0: 让 domain 决定网格范围（必须在生成器之前，见该方法的 docstring）
+        self._reconcile_grid_with_domain(json_ir)
 
         # Step 1: 自动生成网格（如果 JSON IR 中未指定网格参数）
         if self._needs_grid_generation(json_ir):
@@ -421,6 +429,59 @@ class AutoModelBuilder:
         """判断是否需要自动生成网格"""
         grid = json_ir.get("grid", {})
         return not grid.get("nrow") or not grid.get("ncol")
+
+    def _reconcile_grid_with_domain(self, json_ir: dict) -> None:
+        """让 `domain.x_range/y_range` 真正决定网格的覆盖范围。
+
+        此前 `_needs_grid_generation` 只要 grid 里有 nrow/ncol 就直接跳过生成器，
+        于是 domain 与网格再无任何联系。East Texas 案例里 domain 是 5000×4000 m，
+        网格却是 ncol×nrow × 20 m = 218×103 → 4360×2060 m，只盖住域的
+        87%×52%，域外那一圈落在网格之外，而且全程没有任何提示。
+
+        规则：**domain 定范围、grid.delr/delc 定分辨率**（缺省 `DEFAULT_CELL_SIZE`），
+        `n = ceil(L / del)`，使网格恰好盖住域（最多外挑不足一格）。取 ceil 而非
+        round 是有意的：宁可在域外多出一格，也不能让域内的边缘落在网格之外。
+
+        只在 grid 已经声明了 nrow/ncol 时生效——那是缺陷唯一生效的路径。
+        缺失时仍旧交给 AutoGridGenerator，其取格策略本轮不动。因此本方法必须在
+        **生成器之前**调用，否则刚生成的 nrow/ncol 会被误当成用户声明而覆盖掉。
+        """
+        domain = json_ir.get("domain")
+        grid = json_ir.get("grid")
+        if not isinstance(domain, dict) or not isinstance(grid, dict):
+            return
+        xr, yr = domain.get("x_range"), domain.get("y_range")
+        if not (isinstance(xr, (list, tuple)) and len(xr) == 2
+                and isinstance(yr, (list, tuple)) and len(yr) == 2):
+            return
+        try:
+            span = {"ncol": float(xr[1]) - float(xr[0]),
+                    "nrow": float(yr[1]) - float(yr[0])}
+        except (TypeError, ValueError):
+            return
+        if span["ncol"] <= 0 or span["nrow"] <= 0:
+            return
+
+        for key, del_key in (("ncol", "delr"), ("nrow", "delc")):
+            declared = grid.get(key)
+            if isinstance(declared, bool) or not isinstance(declared, (int, float)):
+                continue
+            # 逐行/逐列给出宽度是刻意的局部加密，不能拿平均宽度去重算格数
+            if isinstance(grid.get(del_key), (list, tuple, np.ndarray)):
+                continue
+            cell = self.mapper._unwrap_value(grid.get(del_key), DEFAULT_CELL_SIZE)
+            if not isinstance(cell, (int, float)) or isinstance(cell, bool) or cell <= 0:
+                cell = DEFAULT_CELL_SIZE
+            wanted = max(1, int(math.ceil(span[key] / cell - 1e-9)))
+            if int(declared) == wanted:
+                continue
+            covered = min(100.0, int(declared) * cell / span[key] * 100)
+            self._warn(
+                f"网格 {key} 按域范围重算：{int(declared)} → {wanted}"
+                f"（域 {span[key]:g} m ÷ {cell:g} m/格 向上取整）。"
+                f"原值只盖住域的 {covered:.0f}%，域外的边界条件会落在网格之外"
+            )
+            grid[key] = wanted
 
     # ================================================================
     # TDIS

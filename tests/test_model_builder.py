@@ -174,6 +174,62 @@ with tempfile.TemporaryDirectory() as _td:
     assert _spd3.get(0) == 1e-4, f"标量期应原样保留，得到 {_spd3.get(0)}"
 print("   OK: 无浓度时不展开、不报警（标量原样保留）")
 
+# 6. domain 驱动网格范围（此前 grid.nrow/ncol 一旦存在，domain 就完全被无视）
+print("\n6. Domain drives grid extent...")
+
+def _reconciled(domain, grid):
+    """跑一次网格重算，返回 (结果 grid, 警告条数)。"""
+    with tempfile.TemporaryDirectory() as _td:
+        _b = AutoModelBuilder(_td)
+        _ir = {"domain": domain, "grid": dict(grid)}
+        _b._reconcile_grid_with_domain(_ir)
+        return _ir["grid"], len(_b._build_warnings)
+
+# 6a. 声明值与域不符 → 按 ceil(L/del) 重算，并**必须**留下提示
+_g, _n = _reconciled({"x_range": [0, 3960], "y_range": [0, 1871]},
+                     {"nrow": 103, "ncol": 218})
+assert (_g["nrow"], _g["ncol"]) == (94, 198), f"期望 94x198，得到 {_g['nrow']}x{_g['ncol']}"
+assert _n == 2, f"nrow/ncol 各改一次，应 2 条提示，得到 {_n}"
+print(f"   OK: 103x218 → {_g['nrow']}x{_g['ncol']}（域 3960x1871 ÷ 20 m），提示 {_n} 条")
+
+# 6b. 取 ceil 而非 round：1801/20 = 90.05，round 会得 90，会让域内最北 1 m 掉出网格
+_g, _ = _reconciled({"x_range": [0, 1801], "y_range": [0, 1801]},
+                    {"nrow": 5, "ncol": 5})
+assert (_g["nrow"], _g["ncol"]) == (91, 91), \
+    f"ceil 语义：1801/20 应得 91（不是 round 的 90），得到 {_g['nrow']}"
+assert _g["nrow"] * 20 >= 1801, "网格必须盖住整个域"
+print(f"   OK: ceil 语义 —— 1801 m ÷ 20 m = 91 格（round 会得 90，域内最北 1 m 落空）")
+
+# 6c. 变异对照：已经自洽时**不重算也不报警**（否则提示会沦为噪音）
+_g, _n = _reconciled({"x_range": [0, 3960], "y_range": [0, 1871]},
+                     {"nrow": 94, "ncol": 198})
+assert (_g["nrow"], _g["ncol"]) == (94, 198) and _n == 0, \
+    f"自洽时不该动、不该报警，得到 {_g['nrow']}x{_g['ncol']} / {_n} 条"
+print("   OK: 域与网格自洽时不重算、不报警")
+
+# 6d. delr/delc 是显式标量 → 用它做分辨率，而不是默认 20 m
+_g, _ = _reconciled({"x_range": [0, 1000], "y_range": [0, 400]},
+                    {"nrow": 1, "ncol": 1, "delr": 50, "delc": 100})
+assert (_g["nrow"], _g["ncol"]) == (4, 20), \
+    f"delr=50/delc=100 应得 ncol=20/nrow=4，得到 {_g['nrow']}x{_g['ncol']}"
+print("   OK: 显式 delr/delc 决定分辨率（50 m → 20 列；100 m → 4 行）")
+
+# 6e. delr 是逐列数组 → 局部加密是刻意为之，不拿平均宽度回算格数
+_g, _n = _reconciled({"x_range": [0, 1000], "y_range": [0, 400]},
+                     {"nrow": 7, "ncol": 7, "delr": [10.0] * 7, "delc": [10.0] * 7})
+assert (_g["nrow"], _g["ncol"]) == (7, 7) and _n == 0, \
+    f"逐列 delr 时不该回算，得到 {_g['nrow']}x{_g['ncol']} / {_n} 条"
+print("   OK: 逐列 delr/delc（局部加密）不被回算")
+
+# 6f. domain 缺 range / 退化 range → 一律不动（老 IR 与自造 IR 都不受影响）
+for _dom in ({}, {"x_range": [0, 0], "y_range": [0, 100]},
+             {"x_range": [0, 100]}, {"x_range": "bad", "y_range": [0, 100]},
+             None):
+    _g, _n = _reconciled(_dom, {"nrow": 33, "ncol": 44})
+    assert (_g["nrow"], _g["ncol"]) == (33, 44) and _n == 0, \
+        f"domain={_dom} 时不该动网格，得到 {_g['nrow']}x{_g['ncol']}"
+print("   OK: domain 缺失/退化/非法时不触碰网格")
+
 print("\n" + "=" * 60)
 print("All FloPy auto-modeling tests passed!")
 print("=" * 60)

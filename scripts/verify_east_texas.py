@@ -307,14 +307,17 @@ def check_case_c(res, ws):
 # 为什么必须有这一条：Case B/C 都在 IR 里**显式给了 `grid_indices`**，走的是
 # mapper 的优先级 1 直接透传，于是「源区解析」这条链路在验证套件里**从未被执行过**。
 # 真实 LLM 产出的 IR 恰恰不给 `grid_indices`，只给 `position: "landfill"` ——
-# 于是走上了那条会静默把点源展开成全网格 22454 格的死路（放大 170 倍），
+# 于是走上了那条会静默把点源展开成全网格 18612 格的死路（放大 141 倍），
 # 而全套验证依旧全绿。这条 Case 就是把这个缺口补上。
 #
 # 断言的是**写出来的 .rch**，不是中间对象：只有落盘文件才是用户真正跑的东西。
 # 用 build_simulation + write_simulation 即可，不必真跑 mf6（省几分钟）。
 # ══════════════════════════════════════════════════════════════════════════
 
-# 填埋场验收锁（East Texas 网格 103×218、delr=delc=20 m、原点来自 SHP 外框左下角）
+# 填埋场验收锁（East Texas 网格 94×198、delr=delc=20 m、原点来自 SHP 外框左下角）
+# 网格尺寸由 domain（= SHP 外框 3960×1871 m）驱动：ncol=ceil(3960/20)=198、
+# nrow=ceil(1871/20)=94。源区的 132 格/行列范围**不随网格尺寸变化** ——
+# 格心位置只取决于原点与单元尺寸，两者都没动。这四条锁因此原样保留。
 EXPECT_CELLS = 132
 EXPECT_ROWS = (52, 62)
 EXPECT_COLS = (137, 148)
@@ -436,13 +439,13 @@ def check_case_d(ws):
     n = len(cells)
     print(f"  .rch 逐格记录数 = {n}")
 
-    # 1) 条数：必须是 132，不是 22454（= 103×218 全域）
+    # 1) 条数：必须是 132，不是 18612（= 94×198 全域）
     if n == EXPECT_CELLS:
         print(f"  [OK] .rch 恰好 {EXPECT_CELLS} 条（源区面积 {EXPECT_CELLS * CELL_AREA_M2:g} m²）")
     else:
         print(f"  [FAIL] .rch 记录数 = {n}，期望 {EXPECT_CELLS}")
-        if n == 103 * 218:
-            print("         ← 这是**全网格展开**（103×218），即本次修复要消灭的那个缺陷复发")
+        if n == 94 * 198:
+            print("         ← 这是**全网格展开**（94×198），即本次修复要消灭的那个缺陷复发")
         ok = False
 
     if not cells:
