@@ -1,0 +1,66 @@
+# ============================================================
+# Docker 构建上下文排除表
+#
+# 为什么必须有这个文件
+# --------------------
+# docker/Dockerfile:33 是 `COPY . .` —— 没有排除表时，**整个仓库根目录**
+# 会被打进镜像层。其中 `.env` 带着真实的 LLM API Key、`data/sessions/` 带着
+# 真实用户对话，一旦构建出的镜像被分发出去，镜像层里的任何一层都能被
+# `docker save` + 解包拿到，删掉源文件也收不回来。
+#
+# 判断规则
+# --------
+# 只排**密钥、私有数据、纯开发产物**；运行时真正需要的（app/、scripts/、
+# data/semantic_db.sqlite 的来源 db_init.sql、requirements.txt）一律保留。
+# data/semantic_db.sqlite 本身可以排除 —— Dockerfile:36 会在构建时用
+# scripts/init_semantic_db.py 重建它。
+# ============================================================
+
+# ── 密钥（最高优先级）──────────────────────────────────────
+# .env.* 也要排：.env.bak.20260916 这类备份同样是 .env 的拷贝，
+# 一样带着真实 Key。这与 .gitignore 里的写法是同一条理由。
+.env
+.env.*
+!.env.example
+
+# ── 私有运行时数据（真实用户对话与上传件）─────────────────
+data/sessions/
+data/uploads/
+data/outputs/
+data/semantic_db.sqlite
+
+# ── 日志（含 Gradio 落下的调试日志）────────────────────────
+logs/
+*.log
+
+# ── 版本历史 ───────────────────────────────────────────────
+# .git/ 体积大，且 .git/config 里的 remote URL 可能带凭据
+.git/
+.gitattributes
+.gitignore
+
+# ── 开发与文档产物（运行时用不到）──────────────────────────
+tests/
+docs/
+notebooks/
+deploy/
+docker/
+__pycache__/
+**/__pycache__/
+**/*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.vscode/
+.idea/
+
+# ── MODFLOW 运行中间文件 ───────────────────────────────────
+*.hds
+*.bud
+*.cbc
+*.ucn
+*.ddn
+*.lst
+
+# ── 本文件自身 ─────────────────────────────────────────────
+.dockerignore

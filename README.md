@@ -3,6 +3,9 @@
 > 第一次用、或者只是想把它跑起来？看 [`docs/新手指南.md`](docs/新手指南.md) ——
 > 那是写给**使用者**的（怎么启动、怎么填自己的密钥、怎么调接口、有哪些限制），
 > 不含开发内容。下面这份是简版。
+>
+> 要把接口**写成程序去调**？看 [`docs/api_reference.md`](docs/api_reference.md)
+> （每个字段、每种状态码都写全了）；浏览器里直接试打 `http://127.0.0.1:8000/docs`。
 
 ## 快速启动
 
@@ -58,12 +61,17 @@ curl -X POST http://127.0.0.1:8000/api/model/run \
 
 curl http://127.0.0.1:8000/api/model/status/<task_id>
 curl http://127.0.0.1:8000/api/model/result/<task_id>
-curl -O -J http://127.0.0.1:8000/api/model/result/<task_id>/files/auto_model/head.png
+curl -O -J http://127.0.0.1:8000/api/model/result/<task_id>/files/auto_model/auto_model_gwt.ucn
 ```
 
 四个端点：`POST /api/chat`、`POST /api/model/run`、`GET /api/model/status/{id}`、
 `GET /api/model/result/{id}`（外加一个 `.../files/{name}` 供下载结果文件）。
 
+> 下载用的文件名取自 `/result` 返回的 `files[].path`，**不要自己拼**。
+>
+> **接口只跑建模，不产图、不产报告** —— 图件与 Word 报告只有网页界面那条路径会生成。
+> 要看图要报告，用网页界面跑同一个参数即可。
+>
 > **接口不返回可交互的模型对象**（gwf/gwt），只返回结构化摘要与文件路径 ——
 > 那些对象是 flopy 的内存实例，跨不了进程。
 
