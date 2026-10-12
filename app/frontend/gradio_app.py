@@ -9,11 +9,9 @@ Gradio Web 前端 — Gradio 6.x 兼容版
 import sys
 import io
 import os
+import re
+import uuid
 from pathlib import Path
-
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -66,19 +64,77 @@ from app.utils.debug_monitor import monitor
 logger.info("调试监控器已启用 — 日志: %s", monitor.get_log_file_path())
 
 # ============================================================
-sessions = {}
+# 会话：每个 sid 一套独立的 LLM 三层对象，统一由 session_registry 管理。
+#
+# 这里**不再自己 new DialogueManager()** —— 那用的是模块级单例，等于全服务器
+# 共用一把密钥。分发出去以后必须能分清"谁用谁的 key"，所以交给注册表。
+# 注册表也是 REST 接口将来共用的同一份，避免两个入口各有一套会话。
+from app.llm_agent import session_registry
+
 
 def get_session(sid: str) -> DialogueManager:
-    if sid not in sessions:
-        dm = DialogueManager()
-        # ── 自动恢复上次会话（重启后无需重新输入）──
-        restored = dm.load_session(sid)
-        sessions[sid] = dm
-        if restored:
-            logger.info(f"会话 {sid}: 已从磁盘恢复，历史 {len(dm.state.get('history', []))} 轮")
-            # 标记为刚恢复，供 chat_handler 显示欢迎信息
-            dm._just_restored = True
-    return sessions[sid]
+    return session_registry.get(sid)
+
+
+# ---- 会话编号：每个浏览器一个，互不串号 ----
+_SID_BAD = re.compile(r"[^A-Za-z0-9_-]")
+
+# BrowserState 用它签名后存进浏览器 localStorage。**必须是稳定值**：
+# 若用 Gradio 默认的随机 secret，服务器一重启就解不开旧值，
+# 用户会看到"对话莫名其妙没了"（文件还在 data/sessions/ 下，只是回不去）。
+# 这里允许部署时用环境变量覆盖；不设则用内置常量。
+_SID_SECRET = os.getenv("GW_SESSION_SECRET", "gw-llm-modeling-session-v1")
+
+
+def _sanitize_sid(raw) -> str:
+    """
+    会话编号会被拼进路径（data/sessions/{sid}.json、workspace/run_{sid}），
+    所以只留 [A-Za-z0-9_-]，其余一律剔除 —— 否则就是路径穿越。
+    """
+    s = _SID_BAD.sub("", str(raw or ""))[:40]
+    return s or uuid.uuid4().hex[:12]
+
+
+def _ensure_sid(stored, request: gr.Request):
+    """
+    给每个浏览器分配独立会话编号。
+
+    优先用 localStorage 里存过的（刷新页面不丢会话）；没存过就从 Gradio 的
+    session_hash 派生。两者结合的用意是：**隔离是硬需求，持久化只是体验优化** ——
+    即使浏览器禁用 localStorage，靠 session_hash 仍能保证"不同浏览器不同编号"。
+
+    为什么不能沿用原先的固定 "default"：`gr.State("default")` 的初始值是常量，
+    Gradio 不会替每个浏览器改它，于是所有会话都落进同一个 sessions["default"]
+    和同一份 data/sessions/default.json —— 两个人同时用就会互相覆盖对话与参数。
+    """
+    if stored:
+        return _sanitize_sid(stored)
+    return _sanitize_sid(getattr(request, "session_hash", None))
+
+
+def apply_api_key(sid: str, api_key: str, model: str, api_base: str):
+    """
+    「应用密钥」按钮：给本会话换上使用者自己的 LLM 密钥。
+
+    去向只有一个：session_registry 内存里的 LLMClient.api_key。
+    **不写进 DialogueManager.state** —— state 会被 save_session 序列化到
+    data/sessions/{sid}.json，写进去就等于落盘。日志里也不打密钥本身。
+
+    返回值第二个是清空后的输入框：应用完就把明文从界面上抹掉。
+    """
+    key = (api_key or "").strip()
+    if not key:
+        return ("⚠️ 请先粘贴你的 API Key。留空的话，会继续使用服务器已配置的密钥。",
+                api_key)
+
+    try:
+        session_registry.configure(sid, api_key=key, model=model, api_base=api_base)
+    except Exception as e:
+        logger.error("应用密钥失败: %s", e)
+        return f"❌ 应用失败：{e}", api_key
+
+    return ("✅ 已启用你自己的密钥（仅存在服务器内存，不写入磁盘、不记入日志）。"
+            "刷新页面或重启程序后需要重新填写。"), ""
 
 
 # ============================================================
@@ -86,7 +142,7 @@ def get_session(sid: str) -> DialogueManager:
 # ============================================================
 # 为什么用模块级 dict 而不是 gr.State：缓存里必须留住 gwt（MF6 模型对象）
 # 才能按需读取 .ucn，而它不可序列化。本仓库已有两个同类先例：
-# sessions（sid → DialogueManager）与 plot_styler 单例。
+# session_registry（sid → 三层对象）与 plot_styler 单例。
 _result_cache: dict = {}   # sid -> {gwt, gwf, times, delr, delc, layer, c_range,
                           #         basemap, workspace, velocity, _frame_cache}
 
@@ -1622,12 +1678,35 @@ def create_ui():
     with gr.Blocks(
         title="物理约束嵌入 LLM 的地下水智能建模系统",
     ) as demo:
-        sid_state = gr.State("default")
+        # 会话编号存浏览器 localStorage：刷新不丢会话，且每个浏览器各一个。
+        # 用 gr.State("default") 会让所有浏览器共用同一份会话（见 _ensure_sid）。
+        sid_state = gr.BrowserState("", storage_key="gw_session_id",
+                                    secret=_SID_SECRET)
 
         gr.HTML(_hero_html())
 
         with gr.Row():
             with gr.Column(scale=4):
+                # ── 每人用自己的密钥 ──
+                # 分发出去以后不能让所有人烧部署方 .env 里的那把 key。
+                # 放在对话区上方，是因为它必须在第一次对话之前生效。
+                # 默认折叠：不吓到只想直接用的使用者。
+                with gr.Accordion("模型密钥设置（可选）", open=False,
+                                  elem_classes=["gw-acc"]):
+                    gr.Markdown(
+                        "留空即使用服务器已配置的密钥。填入后只存在服务器内存中，"
+                        "**不写入磁盘、不记入日志**；刷新页面或重启程序后需重新填写。")
+                    api_key_box = gr.Textbox(label="LLM API Key", type="password",
+                                             placeholder="sk-...", lines=1)
+                    with gr.Row():
+                        api_model_box = gr.Textbox(label="模型",
+                                                   value=settings.llm_model, scale=2)
+                        api_base_box = gr.Textbox(label="API Base",
+                                                  value=settings.llm_api_base or "",
+                                                  scale=3)
+                    api_key_btn = gr.Button("应用密钥", variant="primary", size="sm")
+                    api_key_status = gr.Markdown("")
+
                 gr.HTML(panel_header("建模对话", "Dialogue", "chat"))
                 chatbot = gr.Chatbot(label="对话记录", height=450,
                                      elem_classes=["gw-chat"])
@@ -1763,6 +1842,19 @@ def create_ui():
                 report_download = gr.File(label="下载报告")
 
         # === 事件绑定 ===
+        # 页面加载时先确定本浏览器的会话编号，**必须排在所有交互之前** ——
+        # 下面的处理器全都把它当输入，初始为空串的话第一次点按钮会落到空 sid。
+        demo.load(_ensure_sid, inputs=[sid_state], outputs=[sid_state])
+
+        # 「应用密钥」：显式点击才生效 —— **不绑 .change**。
+        # gr.Textbox.change 逐字符触发，粘贴密钥时会拿半截 key 去建客户端
+        # （与下方污染羽输入框同一个理由，见那里的注释）。
+        api_key_btn.click(
+            apply_api_key,
+            [sid_state, api_key_box, api_model_box, api_base_box],
+            [api_key_status, api_key_box],
+        )
+
         def on_send(msg, hist, sid):
             history, ir, miss, phase, sid2 = chat_handler(msg, hist, sid)
             table_df = build_param_table(ir)
@@ -1853,6 +1945,36 @@ def create_ui():
     return demo
 
 
+def _ensure_utf8_stdio() -> None:
+    """
+    让控制台在 Windows 上能打印 UTF-8（模型名、用户输入、路径里常有中文）。
+
+    **刻意放在 launch_ui() 里，而不是模块顶层。** 模块顶层做这件事有两个后果：
+
+    1. 任何 `import app.frontend.gradio_app`（测试、脚本）都会连带改写全局
+       sys.stdout，把导入方自己设好的输出流顶掉，此前缓冲的输出全部丢失 ——
+       `tests/test_all_imports.py` 里 24 个 ✅ 和那 1 个 ❌ 就是这么消失的，
+       红了四个月没人能治，因为看不见病灶。
+    2. 反复导入时每次都新建一个 TextIOWrapper 包住**同一个** buffer；旧 wrapper
+       被回收时会连带关掉它持有的底层 buffer，于是真正的 stdout 被关掉，
+       后续 print 直接抛 `ValueError: I/O operation on closed file`（实测）。
+
+    所以：只在真的要起服务时做一次，且已经包过就不再包。
+    """
+    if sys.platform != "win32":
+        return
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower().replace("-", "")
+    if enc == "utf8":
+        return                       # 已经是 UTF-8 了，别再包一层
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+    except Exception:                # 输出流被测试替换成 StringIO 之类时跳过
+        pass
+
+
 def launch_ui(demo=None, **overrides):
     """
     统一的启动入口（外观参数只在这里给一次）。
@@ -1863,6 +1985,7 @@ def launch_ui(demo=None, **overrides):
     `demo.css` 为空、`demo.head` 为空，界面退回默认外观，且**不报错**。
     收成一个函数是为了让将来新增第二个启动点也自动带上样式。
     """
+    _ensure_utf8_stdio()
     demo = demo if demo is not None else create_ui()
     kwargs = dict(
         theme=build_theme(),

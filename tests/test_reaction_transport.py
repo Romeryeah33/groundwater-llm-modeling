@@ -43,8 +43,10 @@ import numpy as np
 from app.modeling.model_builder import AutoModelBuilder
 from app.modeling.model_mapper import FloPyModelMapper
 from app.physics_engine.constraints import ParameterRangeConstraint, ConstraintSeverity
-# 这个 import 必须在顶部：gradio_app 在 win32 上会重绑 sys.stdout，
-# 中途 import 会把其后所有 print 吞掉（表现为"输出戛然而止但退出码 0"）。
+# 以前这里要求"必须在文件顶部 import"：gradio_app 在 win32 上于**模块顶层**
+# 重绑 sys.stdout，中途 import 会把其后所有 print 吞掉（输出戛然而止、退出码 0）。
+# 2026-10-12 已治本 —— 包装挪进了 _ensure_utf8_stdio()，只在真要起服务时执行，
+# 导入不再有副作用，所以现在放哪儿都行。
 from app.frontend.gradio_app import _effective_reaction_text
 
 _passed = 0
