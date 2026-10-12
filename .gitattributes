@@ -1,0 +1,23 @@
+# 行尾约定：把 CRLF 这件事写进仓库，而不是指望每台机器的 core.autocrlf。
+#
+# 为什么：批处理文件的**行尾必须是 CRLF**（见 tests/test_launchers.py）。
+# 但 git 默认按文本处理、把 CRLF 归一成 LF 存进索引，再按各机的
+# core.autocrlf 决定签出时是否还原 —— autocrlf=true 的 Windows 本机没问题，
+# 可一旦换个 autocrlf=false 的环境（Linux、CI、或手工关掉的同学），
+# 签出来的 .bat 就是裸 LF，`for(...)` 块与 `goto` 标签的解析会出错，
+# 启动程序会以很难查的方式失败。这里显式钉死：.bat 一律以 CRLF 签出。
+*.bat text eol=crlf
+
+# 文件里的中文字节维持原样（UTF-8），不做任何重新编码 —— 配合文件内的
+# chcp 65001 使用。刻意**不用** working-tree-encoding：那个属性会让 git
+# 在签出/入库时改写字节，对已经正确的文件是多余的风险。
+# 下面的二进制/生成物不参与行尾转换
+*.png binary
+*.jpg binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.sqlite binary
+*.shp binary
+*.shx binary
+*.dbf binary
