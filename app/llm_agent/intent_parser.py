@@ -48,8 +48,11 @@ class IntentParser:
         "solver.mxiter", "solver.iter1",
         "transport.enabled", "transport.dispersion.al",
         "transport.dispersion.trpt", "transport.dispersion.trpv",
+        "transport.reaction.sorption", "transport.reaction.sorption.kd",
+        "transport.reaction.bulk_density",
+        "transport.reaction.decay.type",
         "transport.reaction.decay.first_order_rate",
-        "transport.reaction.sorption.kd",
+        "transport.reaction.decay.half_life",
         "boundary_conditions",
     }
 
@@ -470,7 +473,15 @@ class IntentParser:
             "trpt": "transport.dispersion.trpt",
             "trpv": "transport.dispersion.trpv",
             "decay_rate": "transport.reaction.decay.first_order_rate",
+            # 半衰期单独落位，**不**换算成 λ 再写 —— 换算交给程序做，
+            # LLM 换算既不透明也无从核对（界面上会显示换算结果）。
+            "half_life": "transport.reaction.decay.half_life",
             "kd": "transport.reaction.sorption.kd",
+            "bulk_density": "transport.reaction.bulk_density",
+            # 注意：**不要**在这里再加一条 "porosity" —— 上面已有
+            # "porosity": "aquifer.parameters.porosity"。字典里重复键是后写
+            # 的静默胜出，会把孔隙度的写入位置悄悄改掉（`_build_gwt` 两种写法
+            # 都读，但 IR 里应该只有一个权威位置）。
             # 井/源汇项
             "pumping_rate": "source_sinks.well.rate",
             "recharge": "source_sinks.recharge.rate",

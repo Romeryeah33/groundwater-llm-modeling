@@ -328,6 +328,18 @@ class ParameterRangeConstraint:
         "diffc": (1e-11, 1e-7, "m2/d"),
         "kd": (0.0, 1e6, "L/kg"),
         "decay_rate": (1e-6, 10.0, "1/d"),
+        # 反应参数的两个**别名**：IR 里走的是 `transport.reaction.decay.*`，
+        # 名字叫 first_order_rate / half_life，而范围表里只有 decay_rate。
+        # `check_json_ir_params` 拿这两个名字调 `check_param`，查不到就落进
+        # "不在已知物理范围表中，默认通过" 的 INFO 分支 —— **看起来查过了，
+        # 实际一个值都没查**。这是板块一 porosity 逐层那次同类的空转。
+        # half_life 的上下界就是 decay_rate 的倒数（λ=ln2/t½）：
+        #   λ ∈ [1e-6, 10]  ⇔  t½ ∈ [ln2/10, ln2/1e-6] = [0.0693, 6.9315e5]
+        "first_order_rate": (1e-6, 10.0, "1/d"),
+        "half_life": (0.0693, 6.9315e5, "d"),
+        # 线性/非线性吸附必须配干容重（MF6 MST 的 BULK_DENSITY）。文献惯用
+        # kg/L 或 g/cm³（两者数值相同），所以单位按 kg/L 记。
+        "bulk_density": (0.1, 5.0, "kg/L"),
         "pumping_rate": (-50000.0, 50000.0, "m3/d"),
         "recharge_rate": (0.0, 5000.0, "mm/yr"),
         "nrow": (1, 10000, "dimensionless"),
@@ -487,16 +499,18 @@ class ParameterRangeConstraint:
             _emit(pname, pinfo, aqua_type)
 
         # 遍历 transport.reaction
+        # 此前 kd 的检查被写在 `for sub_key in ("decay",)` 循环体内 ——
+        # 只因为那个元组恰好只有一个元素才碰对。挪出来，行为不变但不再靠巧合。
         reaction = json_ir.get("transport", {}).get("reaction", {})
-        for sub_key in ("decay",):
-            sub = reaction.get(sub_key, {})
-            for pname in ("first_order_rate", "half_life"):
-                v = _unwrap(sub.get(pname))
-                if v is not None:
-                    results.append(self.check_param(pname, v, aqua_type))
-            v = _unwrap(reaction.get("kd"))
+        decay_block = reaction.get("decay", {}) or {}
+        for pname in ("first_order_rate", "half_life"):
+            v = _unwrap(decay_block.get(pname))
             if v is not None:
-                results.append(self.check_param("kd", v, aqua_type))
+                results.append(self.check_param(pname, v, aqua_type))
+        for pname in ("kd", "bulk_density"):
+            v = _unwrap(reaction.get(pname))
+            if v is not None:
+                results.append(self.check_param(pname, v, aqua_type))
 
         # 检查网格参数
         grid = json_ir.get("grid", {})

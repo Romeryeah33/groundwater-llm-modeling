@@ -212,6 +212,9 @@ class AutoModelBuilder:
         self._build_warnings: List[str] = []
         # 实际写进 GWT MST/DSP 包的运移参数（含来源），供界面核对
         self._effective_transport: Optional[dict] = None
+        # 实际写进 GWT MST 包的反应参数（吸附 / 降解，含单位换算与来源）
+        # 注意是 MST 不是 IST：MF6 的 IST6 是双域包，见 _reaction_mst_options 的文档串。
+        self._effective_reaction: Optional[dict] = None
 
     # ================================================================
     # 主入口：一键构建完整模拟
@@ -260,6 +263,7 @@ class AutoModelBuilder:
         self._transport_degraded = False
         self._build_warnings = []
         self._effective_transport = None
+        self._effective_reaction = None
         logger.info(
             f"DIS 归一化: nlay={self._dis['nlay']}, nrow={self._dis['nrow']}, "
             f"ncol={self._dis['ncol']}, top={self._dis['top']:g}, botm={self._dis['botm']}"
@@ -999,7 +1003,18 @@ class AutoModelBuilder:
             raise ValueError(
                 f"孔隙度必须在 (0, 1] 区间内，当前范围为 [{por_min}, {por_max}]"
             )
-        flopy.mf6.ModflowGwtmst(gwt, porosity=porosity)
+
+        # 反应项（吸附 / 一级降解）也挂在 MST 上。
+        #
+        # **不要**用 `ModflowGwtist`：MF6 里 IST6 是"非移动域存储与转移"
+        # （Immobile Storage and Transfer）包 —— 它属于**双域**
+        # （mobile–immobile）模型，加了它 MF6 会报
+        # "DUAL DOMAIN IS ACTIVE BUT ZETAIM WAS NOT SPECIFIED"，
+        # 必须再补 THETAIM/ZETAIM 两个假想的非移动域参数。单域模型的反应
+        # 就写在 MST6 的选项里（SORPTION / FIRST_ORDER_DECAY + 对应数组）。
+        _mst_kwargs, self._effective_reaction = self._reaction_mst_options(
+            transport, nlay, nrow, ncol, porosity)
+        flopy.mf6.ModflowGwtmst(gwt, porosity=porosity, **_mst_kwargs)
         if np.ndim(porosity) == 0:
             logger.info(f"GWT MST 孔隙度: {porosity}（全场常数）")
         else:
@@ -1096,6 +1111,198 @@ class AutoModelBuilder:
             )
 
         return gwt
+
+    # MST 包的 bulk_density / distcoef 用的是**模型内部单位**（质量 kg、长度 m），
+    # 而文献与提示词里这两个量惯用 L/kg（Kd）与 kg/L 或 g/cm³（干容重）。
+    # 它们在数值上恰好互为倒数配对（1 L/kg × 1 kg/L = 1，无量纲），所以
+    # **直接把文献值填进去，阻滞因子 R = 1 + ρb·Kd/n 看着是对的**，但 MF6
+    # 输出的吸附相浓度会差 1000 倍。统一换算成 SI 再写，不留这个暗坑。
+    _KD_L_PER_KG_TO_M3_PER_KG = 1e-3     # 1 L/kg = 1e-3 m³/kg
+    _RHOB_KG_PER_L_TO_KG_PER_M3 = 1e3    # 1 kg/L  = 1e3 kg/m³
+    # 干容重缺省值。与 `app/analysis/process_identifier.py` 分析侧的默认一致，
+    # 免得同一次运行里"程序算的"和"图里标的"是两个数。
+    _RHOB_DEFAULT_KG_PER_L = 1.7
+
+    def _reaction_mst_options(self, transport: dict, nlay, nrow, ncol, porosity):
+        """把 IR 里的反应参数翻译成 **MST6** 的构造参数。
+
+        返回 ``(mst_kwargs, effective)``：
+
+        - ``mst_kwargs``：直接透传给 ``ModflowGwtmst(...)``；没有任何反应时为空
+          dict，MST 的产物与改动前**逐字节相同**（既有案例基线不受影响）。
+        - ``effective``：实际写入模型的值 + 来源 + 单位换算前后两套数，
+          由 ``build_and_run`` 带回界面，让"用户给的"与"程序用的"能当场对上。
+
+        为什么是 MST 而不是 IST：MF6 的 IST6 是"非移动域存储与转移"包，属于
+        **双域**（mobile–immobile）模型。加上它 MF6 立刻报
+        ``DUAL DOMAIN IS ACTIVE BUT ZETAIM WAS NOT SPECIFIED``，必须再补
+        THETAIM/ZETAIM 两个并不存在的非移动域参数。单域模型的吸附与降解写在
+        MST6 的选项里 —— 实测（MF6 6.3.0，Case B）：基线峰值 4.5254，
+        加 λ=0.01 后 1.4034，加 Kd=1 L/kg 后 0.8694。
+        """
+        sorption = str(transport.get("sorption", "none") or "none").lower()
+        decay_type = str(transport.get("decay_type", "none") or "none").lower()
+        want_sorption = sorption not in ("", "none", "null")
+        want_decay = decay_type not in ("", "none", "null")
+
+        eff = {
+            "sorption": "none",
+            "decay_type": "none",
+            "decay_rate": None,
+            "decay_rate_source": transport.get("decay_rate_source"),
+            "half_life_input": transport.get("half_life"),
+            "half_life_effective": None,
+            "kd_input": None,
+            "kd_input_unit": "L/kg",
+            "kd_si": None,
+            "bulk_density_input": None,
+            "bulk_density_input_unit": "kg/L",
+            "bulk_density_si": None,
+            "bulk_density_source": None,
+            "retardation": None,
+            "decay_sorbed": None,
+            "decay_note": None,
+        }
+        if not want_sorption and not want_decay:
+            return {}, eff
+
+        kwargs = {}
+        decay_rate = transport.get("decay_rate")
+        sorption_applied = False
+        decay_applied = False
+
+        # 逐层输入的归一化帮手：标量原样透传、长度 nlay 的序列展成
+        # (nlay,nrow,ncol)。与孔隙度/弥散度走同一套规则（含长度校验）。
+        def _lay(v, name):
+            if v is None:
+                return None
+            return _to_layer_array(v, nlay, nrow, ncol, name)
+
+        def _rep(v):
+            """进 effective 记录前压成可读形式：标量给数、逐层给各层值。"""
+            if v is None:
+                return None
+            return (float(v) if np.ndim(v) == 0
+                    else list(np.round(np.asarray(v, dtype=float)[:, 0, 0], 6)))
+
+        # ── 吸附 ──
+        if want_sorption:
+            kd_n = _lay(transport.get("kd"), "分配系数 Kd")
+            kd_f = None if kd_n is None else float(np.min(kd_n))
+            if kd_n is None or kd_f <= 0:
+                # 启用吸附却拿不到 Kd。写一个 Kd=0 的包等于"开了吸附但一点没吸"，
+                # 用户会以为自己建的是吸附模型 —— 正是本轮要消灭的失败类型。
+                # 跳过并**说出来**，不做静默兜底。
+                self._warn(
+                    f"已指定吸附模型 {sorption}，但 IR 中取不到有效的分配系数 Kd"
+                    f"（Kd 必须为正），本次未写入吸附项（模型按无吸附运行）。"
+                    f"请在提示词中给出分配系数 Kd（单位 L/kg）。"
+                )
+            else:
+                kd_si = kd_n * self._KD_L_PER_KG_TO_M3_PER_KG
+                rho_b = transport.get("bulk_density")
+                rho_src = transport.get("bulk_density_source") or "ir"
+                if rho_b is None:
+                    rho_b = self._RHOB_DEFAULT_KG_PER_L
+                    rho_src = "default"
+                rho_n = _to_layer_array(rho_b, nlay, nrow, ncol, "干容重")
+                rho_b_si = rho_n * self._RHOB_KG_PER_L_TO_KG_PER_M3
+
+                kwargs["sorption"] = sorption.upper()
+                kwargs["distcoef"] = kd_si
+                kwargs["bulk_density"] = rho_b_si
+                sorption_applied = True
+                if sorption in ("freundlich", "langmuir"):
+                    sp2 = transport.get("sp2")
+                    if sp2 is None:
+                        sp2 = 1.0
+                        self._warn(
+                            f"吸附模型 {sorption} 需要第二参数 SP2"
+                            f"（Freundlich 指数 / Langmuir 最大吸附量），"
+                            f"IR 中未给出，已按 1.0 写入。Freundlich 下 SP2=1 "
+                            f"退化为线性等温线；若这不是你想要的，请显式给出 SP2。"
+                        )
+                    kwargs["sp2"] = float(sp2)
+
+                # 阻滞因子 R = 1 + ρb·Kd/n —— 用户直接关心的量，顺手算出来。
+                # 判维度要看 **_r 自己**：Kd/ρb 逐层而孔隙度是标量时（或反之），
+                # 广播结果已经是数组，按 porosity 的维度判会误走 float() 分支。
+                _r = 1.0 + (rho_b_si * kd_si) / np.asarray(porosity, dtype=float)
+                eff["retardation"] = (
+                    [float(x) for x in np.round(np.asarray(_r)[:, 0, 0], 4)]
+                    if np.ndim(_r) > 0 else float(_r)
+                )
+                if rho_src == "default":
+                    self._warn(
+                        f"未给出干容重 BULK_DENSITY，已按 {self._RHOB_DEFAULT_KG_PER_L:g} kg/L "
+                        f"写入（文献常见取值）。阻滞因子 R = 1 + ρb·Kd/n 对 ρb 是"
+                        f"线性敏感的，有实测干容重时请显式给出。"
+                    )
+                eff.update({
+                    "sorption": sorption,
+                    "kd_input": _rep(kd_n),
+                    "kd_si": _rep(kd_si),
+                    "bulk_density_input": _rep(rho_n),
+                    "bulk_density_si": _rep(rho_b_si),
+                    "bulk_density_source": rho_src,
+                })
+
+        # ── 一级降解 ──
+        if want_decay:
+            if decay_type == "multi_species":
+                self._warn(
+                    "降解类型为 multi_species（多组分链式反应），当前实现只支持"
+                    "一级降解，已按一级降解处理。母体/子体的产率链需要多组分运移"
+                    "配合，请确认结果是否满足需要。"
+                )
+            rate_n = _lay(decay_rate, "一级降解速率 λ")
+            rate_f = None if rate_n is None else float(np.min(rate_n))
+            if rate_n is None or rate_f <= 0:
+                self._warn(
+                    "已指定一级降解，但 IR 中既没有降解速率 λ 也没有半衰期 t½，"
+                    "本次未写入降解项（模型按不降解运行）。"
+                    "请在提示词中给出降解速率（1/d）或半衰期（d）。"
+                )
+            else:
+                kwargs["first_order_decay"] = True
+                kwargs["decay"] = rate_n
+                decay_applied = True
+                eff["decay_type"] = decay_type
+                eff["decay_rate"] = _rep(rate_n)
+                eff["half_life_effective"] = _rep(math.log(2.0) / rate_n)
+                src = transport.get("decay_rate_source")
+                if src == "half_life":
+                    eff["decay_note"] = (
+                        f"由 IR 中的半衰期 t½={float(transport.get('half_life')):g} d "
+                        f"换算 λ=ln2/t½={rate_f:g} 1/d"
+                    )
+                else:
+                    eff["decay_note"] = "由 IR 中的一级降解速率直接给出"
+
+        # MF6 要求：吸附与降解**同时**开启时必须给 DECAY_SORBED，
+        # 否则硬报 "DECAY_SORBED not provided in GRIDDATA block ..."。
+        # 取 0 是有依据的：MF6 里吸附相与溶解相各自带一个衰减率，令 λ_sorbed=0
+        # 时总方程恰好退化为经典（MT3DMS 同源）形式
+        #     R·∂C/∂t = ∇·(D∇C) − v·∂C/∂x − λC
+        # 若取 λ_sorbed=λ，等效衰减率会变成 λR，与解析解对不上。
+        if sorption_applied and decay_applied:
+            kwargs["decay_sorbed"] = 0.0
+            eff["decay_sorbed"] = 0.0
+            self._warn(
+                f"吸附与降解同时启用：MF6 要求显式给出吸附相衰减率 DECAY_SORBED，"
+                f"已按 0 写入。这样总方程退化为经典的 R·∂C/∂t = ∇·(D∇C) − v∇C − λC"
+                f"（λ = {eff['decay_rate']} 1/d，R = {eff['retardation']}）。"
+                f"若你认为吸附相也在降解（总质量按 λ 衰减），这需要另行设定。"
+            )
+
+        if kwargs:
+            logger.info(
+                f"GWT MST 反应项: sorption={eff['sorption']}, decay={eff['decay_rate']} 1/d, "
+                f"bulk_density={eff['bulk_density_si']} kg/m3, "
+                f"distcoef={eff['kd_si']} m3/kg, R={eff['retardation']}, "
+                f"decay_sorbed={eff['decay_sorbed']}"
+            )
+        return kwargs, eff
 
     def _resolve_explicit_sources(self, transport: dict) -> list:
         """解析 IR 中显式声明的 SSM 源，并校验其引用的包与辅助变量真实存在
@@ -1235,6 +1442,7 @@ class AutoModelBuilder:
                 "detail": self._extract_error_report(self.workspace / sim_name / "mfsim.lst"),
                 # 失败前攒下的提示照样带出去：很可能正是其中一条解释了失败原因
                 "build_warnings": list(self._build_warnings),
+                "reaction_effective": self._effective_reaction,
             }
 
         # 读取结果
@@ -1253,6 +1461,8 @@ class AutoModelBuilder:
             "build_warnings": list(self._build_warnings),
             # 实际写进 MST/DSP 的运移参数与来源，供界面逐项核对
             "transport_effective": self._effective_transport,
+            # 实际写进 MST 的反应参数与来源（含 Kd/ρb 的单位换算），同上一行
+            "reaction_effective": self._effective_reaction,
             "sim": sim,
             "gwf": self._gwf,
             "gwt": self._gwt,

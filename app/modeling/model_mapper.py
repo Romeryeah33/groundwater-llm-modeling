@@ -5,6 +5,7 @@ JSON IR → FloPy 参数映射器
 """
 
 import logging
+import math
 from typing import Optional
 
 import numpy as np
@@ -517,20 +518,85 @@ class FloPyModelMapper:
         else:
             result["diffc"] = 1e-9  # 默认分子扩散 m²/d
 
-        # 反应参数
-        reaction = transport.get("reaction", {})
-        if reaction.get("sorption", "none") != "none":
-            result["sorption"] = reaction["sorption"]
+        # ── 反应参数（MF6 IST 包：吸附 / 一级降解）──
+        #
+        # 这一段以前只把值塞进 result，而 `_build_gwt` **从不读** —— 参数被
+        # 从 IR 里读出来、被校验器过一次范围、然后静默丢弃，模型里根本没有反应。
+        # 现在补齐读取侧，并把"用户给的值 / 程序实际写入的值 / 兜底来源"都带出去。
+        reaction = transport.get("reaction", {}) or {}
+
+        sorption = str(self._unwrap_value(reaction.get("sorption"), "none") or "none").strip().lower()
+        if sorption in ("", "null"):
+            sorption = "none"
+        if sorption not in ("none", "linear", "freundlich", "langmuir"):
+            logger.warning(
+                f"未知的吸附模型 '{sorption}'（MF6 IST 仅支持 "
+                f"none/linear/freundlich/langmuir），按 none 处理"
+            )
+            sorption = "none"
+        result["sorption"] = sorption
+
+        if sorption != "none":
+            # DISTCOEF 是 MF6 里 Kd 的名字，两种写法都收
             kd = self._unwrap_value(reaction.get("kd"))
+            if kd is None:
+                kd = self._unwrap_value(reaction.get("distcoef"))
             if kd is not None:
                 result["kd"] = kd
+                result["kd_source"] = "ir"
+            else:
+                # 说了要吸附却不给 Kd。取 0 建包等于"吸附了但一点没吸"，
+                # 悄悄出一个无吸附的模型 —— 正是本轮要消灭的失败类型。
+                # 这里如实标 missing，由 `_build_gwt` 提示并跳过吸附。
+                result["kd_source"] = "missing"
+            # 非线性等温线的第二参数：FREUNDLICH 为指数 n、LANGMUIR 为
+            # 最大吸附量。IR 里可能叫 sp2 / freundlich_exponent / smax。
+            sp2 = self._unwrap_value(reaction.get("sp2"))
+            if sp2 is None:
+                sp2 = self._unwrap_value(reaction.get("freundlich_exponent"))
+            if sp2 is None:
+                sp2 = self._unwrap_value(reaction.get("smax"))
+            if sp2 is not None:
+                result["sp2"] = sp2
+            # 干容重：MF6 的 BULK_DENSITY，缺了 IST 读不动吸附
+            rho_b = self._unwrap_value(reaction.get("bulk_density"))
+            if rho_b is None:
+                rho_b = self._unwrap_value(reaction.get("rho_bulk"))
+            if rho_b is not None:
+                result["bulk_density"] = rho_b
+                result["bulk_density_source"] = "ir"
+            else:
+                result["bulk_density_source"] = "default"
 
-        decay = reaction.get("decay", {})
-        if decay.get("type", "none") != "none":
-            result["decay_type"] = decay["type"]
+        decay = reaction.get("decay", {}) or {}
+        decay_type = str(self._unwrap_value(decay.get("type"), "none") or "none").strip().lower()
+        if decay_type in ("", "null"):
+            decay_type = "none"
+        if decay_type not in ("none", "first_order", "multi_species"):
+            logger.warning(
+                f"未知的降解类型 '{decay_type}'，按 none 处理"
+            )
+            decay_type = "none"
+        result["decay_type"] = decay_type
+
+        if decay_type != "none":
             rate = self._unwrap_value(decay.get("first_order_rate"))
+            half_life = self._unwrap_value(decay.get("half_life"))
             if rate is not None:
                 result["decay_rate"] = rate
+                result["decay_rate_source"] = "first_order_rate"
+            elif half_life is not None and float(half_life) > 0:
+                # 提示词里给了半衰期却没给 λ —— 此前这条路径不存在，
+                # 结果是 decay_type 有值、decay_rate 没有，即便建了 IST 也没速率。
+                result["decay_rate"] = math.log(2.0) / float(half_life)
+                result["decay_rate_source"] = "half_life"
+            elif half_life is not None:
+                logger.warning(f"半衰期 half_life={half_life} 非正，无法换算为降解速率，忽略")
+                result["decay_rate_source"] = "invalid_half_life"
+            else:
+                result["decay_rate_source"] = "missing"
+            if half_life is not None:
+                result["half_life"] = half_life
 
         # 对流格式：白名单化，避免把 6.3.0 不认的关键字写进 ADV 包导致硬终止
         adv = transport.get("advection", {})

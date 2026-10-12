@@ -213,6 +213,76 @@ PARAM_GUIDE = {
         "example": "纵向弥散度为 50 米",
         "why_needed": "控制溶质运移的对流-弥散过程，影响污染羽扩散形态",
     },
+    # ── 反应参数（MF6 的 MST6 包：吸附 / 一级降解）──
+    # 此前这一整组**没有任何条目** —— 提示词模板里列了"反应参数：吸附参数(Kd)、
+    # 降解速率、RT3D反应模块"，但参数指南里查不到它们，LLM 缺参时也就问不出
+    # 有依据的问题。补上，单位沿用文献惯用写法（Kd: L/kg，ρb: kg/L）。
+    "transport.reaction.sorption": {
+        "display_name_cn": "吸附模型",
+        "nature": "溶质在固相与液相之间的分配方式。none=不吸附；linear=线性等温线"
+                  "（最常见的 Kd 模型）；freundlich/langmuir=非线性等温线",
+        "priority": "P3（优化性）— 用户未提及吸附时按 none 处理，不主动提问",
+        "valid_range": "取值: none | linear | freundlich | langmuir",
+        "format": "字符串",
+        "unit": "无",
+        "example": "污染物按线性吸附考虑",
+        "why_needed": "决定是否启用吸附：启用后溶质迁移速度变慢（阻滞因子 R>1）",
+    },
+    "transport.reaction.kd": {
+        "display_name_cn": "分配系数 (Kd)",
+        "nature": "线性吸附等温线的分配系数，固相浓度与液相浓度之比。"
+                  "R = 1 + ρb·Kd/n 是阻滞因子",
+        "priority": "P3（优化性）— 仅在启用吸附时必需",
+        "valid_range": f"0 ~ {_range_text('kd', 'e')} L/kg（随有机碳含量变化，可相差数个量级）",
+        "format": "浮点数，单位 L/kg（与 mL/g 数值相同）",
+        "unit": "L/kg",
+        "example": "分配系数 Kd 为 0.5 L/kg",
+        "why_needed": "启用吸附却不给 Kd 时模型会按无吸附运行，结果显著偏快",
+    },
+    "transport.reaction.bulk_density": {
+        "display_name_cn": "干容重 (ρb)",
+        "nature": "含水层固体骨架的干容重，与 Kd 一起决定阻滞因子",
+        "priority": "P3（优化性）— 未给出时按 1.7 kg/L 兜底并提示",
+        "valid_range": f"0.1 ~ {_range_text('bulk_density')} kg/L"
+                       "（砂 1.4~1.8，黏土 1.1~1.6）",
+        "format": "浮点数，单位 kg/L（与 g/cm³ 数值相同）",
+        "unit": "kg/L",
+        "example": "干容重为 1.7 kg/L",
+        "why_needed": "阻滞因子 R = 1 + ρb·Kd/n 对 ρb 线性敏感，缺省值可能偏离实测",
+    },
+    "transport.reaction.decay.type": {
+        "display_name_cn": "降解类型",
+        "nature": "溶质的反应衰减方式。none=不降解；first_order=一级动力学衰减；"
+                  "multi_species=多组分链式反应（当前实现按一级降解处理并提示）",
+        "priority": "P3（优化性）— 用户未提及降解时按 none 处理",
+        "valid_range": "取值: none | first_order | multi_species",
+        "format": "字符串",
+        "unit": "无",
+        "example": "按一级动力学降解",
+        "why_needed": "决定是否启用降解项",
+    },
+    "transport.reaction.decay.first_order_rate": {
+        "display_name_cn": "一级降解速率 (λ)",
+        "nature": "一级衰减常数，浓度按 C = C0·exp(−λt) 衰减",
+        "priority": "P3（优化性）— 与半衰期二选一，给一个即可",
+        "valid_range": f"1e-6 ~ {_range_text('first_order_rate')} 1/d"
+                       "（取决于污染物与电子受体条件）",
+        "format": "浮点数，单位 1/d",
+        "unit": "1/d",
+        "example": "降解速率为 0.001 /d",
+        "why_needed": "启用降解却不给 λ 也不给 t½ 时模型按不降解运行",
+    },
+    "transport.reaction.decay.half_life": {
+        "display_name_cn": "半衰期 (t½)",
+        "nature": "浓度衰减到一半所需时间，与一级降解速率的关系为 λ = ln2 / t½",
+        "priority": "P3（优化性）— 与 λ 二选一；**给了 t½ 就不必自己换算 λ**，"
+                    "程序按 λ = ln2/t½ 换算并在界面上显示结果",
+        "valid_range": "0.0693 ~ 693150 d（即 λ 的倒数区间）",
+        "format": "浮点数，单位 d（天）",
+        "unit": "d",
+        "example": "半衰期为 693 天",
+        "why_needed": "用户习惯以半衰期描述衰减，此前这条路径没有接线",
+    },
     # ── GHB / 边界参数 ──
     "ghb_stage": {
         "display_name_cn": "GHB 边界水头 (stage)",

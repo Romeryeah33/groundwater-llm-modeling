@@ -999,6 +999,46 @@ def _effective_transport_text(build_result: dict) -> str:
             f"D*={eff.get('diffc')}")
 
 
+def _effective_reaction_text(build_result: dict) -> str:
+    """
+    把**实际写进 GWT MST 包**的反应参数摆到界面上，供用户与提示词对账。
+
+    为什么需要它：反应参数（吸附 Kd / 一级降解 λ）此前被 mapper 读出来、
+    被校验器过一次范围，然后**静默丢弃** —— 模型里根本没有反应，界面上也
+    没有任何地方能发现。现在两个易错点都显式摆出来：
+      1. 单位换算：IR 里 Kd 惯用 L/kg、干容重惯用 kg/L，而 MF6 要 m³/kg、kg/m³；
+      2. 来源：Kd / 干容重 / λ 是从输入拿到的，还是走了默认值。
+    """
+    eff = (build_result or {}).get("reaction_effective") or {}
+    if not eff:
+        return "未启用溶质运移"
+
+    def _fmt(v):
+        if isinstance(v, list):
+            return "逐层 " + "/".join(f"{x:g}" for x in v)
+        try:
+            return f"{float(v):g}"
+        except (TypeError, ValueError):
+            return str(v)
+
+    parts = []
+    if eff.get("sorption", "none") != "none":
+        rho_src = {"ir": "输入", "default": "默认值"}.get(
+            eff.get("bulk_density_source"), "?")
+        parts.append(
+            f"吸附={eff['sorption']}，Kd={_fmt(eff.get('kd_input'))} L/kg"
+            f"（ρb={_fmt(eff.get('bulk_density_input'))} kg/L，{rho_src}）")
+        if eff.get("retardation") is not None:
+            parts.append(f"阻滞因子 R={_fmt(eff.get('retardation'))}")
+    if eff.get("decay_rate"):
+        src = {"first_order_rate": "输入 λ", "half_life": "输入 t½ 换算"}.get(
+            eff.get("decay_rate_source"), eff.get("decay_rate_source") or "?")
+        parts.append(f"降解 λ={_fmt(eff.get('decay_rate'))} 1/d（{src}）")
+        if eff.get("half_life_effective"):
+            parts.append(f"等效 t½={_fmt(eff.get('half_life_effective'))} d")
+    return "｜".join(parts) if parts else "无（模型按不吸附、不降解运行）"
+
+
 def _warning_card_html(val_result: dict) -> str:
     """
     把校验**警告**渲染成界面上可见的琥珀色卡片。
@@ -1270,6 +1310,7 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
                     ("水均衡误差", f"{_wb_err:.4f} %", _wb_tone),
                     ("计划模拟时长（来自 IR）", _planned_duration_text(json_ir), ""),
                     ("运移参数（实际写入模型）", _effective_transport_text(result), ""),
+                    ("反应参数（实际写入模型）", _effective_reaction_text(result), ""),
                 ]) + warn_html
                 # 源区那一行是用户能亲眼看到的"修复生效"证据：取代了旧代码
                 # 那句到不了任何 UI 组件的 logger.info

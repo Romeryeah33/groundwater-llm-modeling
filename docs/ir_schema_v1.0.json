@@ -251,6 +251,9 @@
             "diffc": {"$ref": "#/definitions/param_with_constraint"}
           }
         },
+        "porosity": {
+          "description": "有效孔隙度。可以写成标量，也可以写成逐层数组（如 {\"value\": [0.3, 0.2]}，第 1 层在前，长度须等于 grid.nlay）。逐层时程序写 LAYERED，标量写 CONSTANT。"
+        },
         "advection": {
           "type": "object",
           "properties": {
@@ -269,13 +272,20 @@
               "enum": ["none", "linear", "freundlich", "langmuir"],
               "default": "none"
             },
-            "kd": {"$ref": "#/definitions/param_with_constraint"},
+            "kd": {"$ref": "#/definitions/param_with_constraint",
+                   "description": "分配系数，单位 L/kg（惯用写法 mL/g，两者数值相同）。程序写入 MF6 时换算成 m3/kg。逐层写数组。"},
+            "bulk_density": {"$ref": "#/definitions/param_with_constraint",
+                             "description": "含水层介质干容重，单位 kg/L（与 g/cm3 数值相同）。线性/非线性吸附必须配它；IR 中不给时程序按 1.7 kg/L 兜底，并在界面上标明来源。程序写入 MF6 时换算成 kg/m3。"},
+            "sp2": {"$ref": "#/definitions/param_with_constraint",
+                    "description": "Freundlich 指数（sorption=freundlich）或 Langmuir 最大吸附量（sorption=langmuir）。IR 中不给时程序按 1.0 兜底并给出提示。"},
             "decay": {
               "type": "object",
               "properties": {
                 "type": {"enum": ["none", "first_order", "multi_species"]},
-                "first_order_rate": {"$ref": "#/definitions/param_with_constraint"},
-                "half_life": {"$ref": "#/definitions/param_with_constraint"}
+                "first_order_rate": {"$ref": "#/definitions/param_with_constraint",
+                                     "description": "一级降解/衰减速率 λ，单位 1/d。与 half_life 二选一；两者都给时 first_order_rate 优先。"},
+                "half_life": {"$ref": "#/definitions/param_with_constraint",
+                              "description": "半衰期 t½，单位 d。程序按 λ = ln2/t½ 换算，**不要**在 IR 里自行换算成 λ（界面上会显示换算结果）。"}
               }
             },
             "rt3d_package": {"type": "string"}
