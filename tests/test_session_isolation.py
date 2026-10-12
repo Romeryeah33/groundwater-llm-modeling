@@ -29,6 +29,8 @@
   6. 会话编号经过**消毒**，不能拼出路径穿越。
   7. 模块导入**不再改写全局 stdout**（改写的后果：导入方的输出被吞；反复导入会
      把底层 buffer 关掉，后续 print 抛 `I/O operation on closed file`）。
+     这条用**非 UTF-8 的假流**触发，否则 `_ensure_utf8_stdio` 的早退会让断言
+     永远绿（空过的绿勾）—— 详见第 7 节的注释。
   8. 两个**全局单例**界面（`monitor` 调试面板、`plot_styler`「图件修改」Tab）
      对使用者隐藏 —— 隐藏是 `visible=False` 而**不是删除**，所以还要锁住
      "组件仍在、绑定仍在"，否则"隐藏"会退化成断线。
@@ -289,24 +291,67 @@ assert _gdm_b.state["json_ir"].get("project", {}).get("name") != "只有A改过"
 _ok("改 A 的参数不会影响 B（get_session 层面隔离住了）")
 
 # ================================================================
-print("\n7. 导入不再改写全局 stdout...")
+print("\n7. 导入不再改写全局 stdout（走真路径才算数）...")
 # ================================================================
-stdout_before = sys.stdout
-import importlib
-importlib.reload(ga)
-assert sys.stdout is stdout_before, \
-    "import gradio_app 改写了全局 sys.stdout —— 会吞掉导入方的输出"
-_ok("重新导入 gradio_app 后 sys.stdout 对象未被替换")
+# 为什么不能只写 `assert sys.stdout is stdout_before`：
+# 测试环境总有 PYTHONIOENCODING=utf-8，而 _ensure_utf8_stdio 一看到 stdout
+# 已是 utf-8 就**早退**（gradio_app.py 的 `if enc == "utf8": return`）。
+# 也就是说，把重绑挪回模块顶层，那条断言照样绿 —— 它从没走进过重绑分支，
+# 是个空过的绿勾（实测：挪回顶层后本节依然全绿）。
+#
+# 办法：临时把 stdout 换成一个 **encoding 不是 UTF-8** 的假流，逼重绑分支
+# 真的执行。于是同时锁住两件事：
+#   ① 模块顶层若重绑 → 假流被顶掉 → 红。这是"导入会吞输出"那个故障。
+#   ② 直接调用函数**必须**发生重绑（正向对照）—— 否则函数退化成 no-op 时，
+#      ①也因为"反正什么都没发生"而永远绿，等于没锁。
+# 另外顺带在真路径上验幂等：连调三次不能把底层 buffer 关掉（旧 wrapper 被
+# 回收会连带关掉它持有的 buffer，之后 print 抛 I/O operation on closed file）。
+import io as _io
+import importlib as _importlib
 
-# _ensure_utf8_stdio 必须幂等：反复调用不能把底层 buffer 关掉
+
+class _FakeStd:
+    """假的标准输出：encoding 故意不是 UTF-8，且把写入吞掉。"""
+
+    encoding = "gbk"
+    errors = "strict"
+
+    def __init__(self):
+        self.buffer = _io.BytesIO()
+
+    def write(self, s):
+        return len(s)
+
+    def flush(self):
+        pass
+
+
+_real_out, _real_err = sys.stdout, sys.stderr
+_fake_out, _fake_err = _FakeStd(), _FakeStd()
+sys.stdout, sys.stderr = _fake_out, _fake_err
 try:
+    _importlib.reload(ga)
+    if sys.stdout is not _fake_out:
+        raise AssertionError(
+            "import gradio_app 改写了全局 sys.stdout —— 会吞掉导入方的输出。"
+            "这次是在一个非 UTF-8 的假流上触发的，说明重绑被放回了模块顶层")
     ga._ensure_utf8_stdio()
+    if sys.stdout is _fake_out:
+        raise AssertionError(
+            "_ensure_utf8_stdio 面对非 UTF-8 的 stdout 没有重绑 —— "
+            "函数已成 no-op，上面那条断言也就永远绿、失去意义")
+    _wrapped = sys.stdout
+    ga._ensure_utf8_stdio()          # 幂等：再来两次，不能又包一层、更不能关掉 buffer
     ga._ensure_utf8_stdio()
-    ga._ensure_utf8_stdio()
-    print("       （这里是幂等性探针的实际输出）")
-    _ok("_ensure_utf8_stdio 连调 3 次后 stdout 仍可用（幂等）")
+    if sys.stdout is not _wrapped:
+        raise AssertionError("_ensure_utf8_stdio 不幂等：重复调用又包了一层新流")
+    print("       （这句写进了被包住的假流，属正常）")
 except ValueError as e:
     raise AssertionError(f"_ensure_utf8_stdio 不幂等，stdout 被关掉了: {e}")
+finally:
+    sys.stdout, sys.stderr = _real_out, _real_err
+
+_ok("导入不改写 stdout；非 UTF-8 时才重绑，且幂等（三条都在真路径上验的）")
 
 _ensure_src = ga.__file__
 assert "_ensure_utf8_stdio" in Path(_ensure_src).read_text(encoding="utf-8")

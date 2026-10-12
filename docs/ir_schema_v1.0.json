@@ -5,6 +5,12 @@
   "description": "物理约束嵌入LLM的地下水智能建模 — 中间态参数协议 v1.0",
   "version": "1.0.0",
   "type": "object",
+
+  "x-gw-status-legend": {
+    "not_implemented": "此字段在协议里保留，但**当前程序没有任何代码读取它** —— 写进 IR 也不会影响建模结果。标注依据是 2026-10-12 对 app/ 全目录的实际 grep。要改成已实现，得先真的接线，再改标注。",
+    "implemented": "字段被真实消费（默认：未标注即视为已实现）。带此标注的字段另附 consume_by 指出消费方。",
+    "why-annotate": "标错比不标更坏：误把活代码标成 not_implemented，会误导下一个接手的人把它删掉。所以每一条标注都必须有 grep 证据，且 tests/test_ir_schema.py 会锁住这份标注表与消费方。"
+  },
   "required": ["ir_version", "project", "domain", "grid", "aquifer"],
   "properties": {
     "ir_version": {
@@ -45,7 +51,8 @@
         },
         "rotation_angle": {
           "type": "number", "default": 0.0,
-          "description": "网格旋转角度（度）"
+          "description": "网格旋转角度（度）",
+          "x-gw-status": "not_implemented"
         },
         "origin_xy": {
           "type": "array",
@@ -55,7 +62,8 @@
           "description": "网格左下角在 SHP/真实坐标系中的 [x0, y0]。上传 SHP 时由程序按边界外框自动写入，源区选格与底图对齐都以此为准；缺省表示使用局部坐标系原点 (0, 0)。"
         },
         "crs": {
-          "type": "string", "description": "坐标参考系 (EPSG code)"
+          "type": "string", "description": "坐标参考系 (EPSG code)",
+          "x-gw-status": "not_implemented"
         }
       }
     },
@@ -92,6 +100,8 @@
         },
         "refinement_zones": {
           "type": "array",
+          "x-gw-status": "implemented",
+          "x-gw-consume_by": "app/modeling/grid_generator.py:32,73,119",
           "items": {
             "type": "object",
             "properties": {
@@ -145,6 +155,7 @@
         "zones": {
           "type": "array",
           "description": "参数分区（非均质）",
+          "x-gw-status": "not_implemented",
           "items": {
             "type": "object",
             "properties": {
@@ -190,6 +201,9 @@
           "parameters": {"type": "object", "description": "边界参数（头值、传导系数等）"},
           "stress_periods": {
             "type": "array",
+            "description": "该边界随应力期变化的取值。**这是活字段**（初稿的标注清单曾把它误列为未实现，实测被 model_mapper 读取）。",
+            "x-gw-status": "implemented",
+            "x-gw-consume_by": "app/modeling/model_mapper.py:267",
             "items": {
               "type": "object",
               "properties": {
@@ -233,6 +247,30 @@
         }
       }
     },
+    "initial_conditions": {
+      "type": "object",
+      "description": "初始条件。当前只消费 `head`（稳态时用作初始水头猜测）。",
+      "x-gw-status": "implemented",
+      "x-gw-consume_by": "app/modeling/model_builder.py:818, app/llm_agent/intent_parser.py:1138",
+      "properties": {
+        "head": {
+          "oneOf": [
+            {"type": "number", "description": "均匀初始水头 (m)"},
+            {"type": "array", "description": "逐格初始水头数组"}
+          ]
+        }
+      }
+    },
+    "source_sinks": {
+      "type": "object",
+      "description": "源汇项（抽水井 / 补给等）的另一种写法。解析器把它列入合法顶层键（`IntentParser.VALID_TOP_KEYS`），但没有建模代码读它 —— 井与补给实际走 `boundary_conditions` 里的 `wel` / `rch`。",
+      "x-gw-status": "not_implemented"
+    },
+    "observation_points": {
+      "type": "array",
+      "description": "观测点。解析器把它列入合法顶层键，但没有建模代码读它（`output.observation_points` 同样无人读）。",
+      "x-gw-status": "not_implemented"
+    },
     "transport": {
       "type": "object",
       "properties": {
@@ -240,7 +278,9 @@
         "species": {
           "type": "array",
           "items": {"type": "string"},
-          "description": "溶质组分列表"
+          "description": "溶质组分列表",
+          "x-gw-status": "implemented",
+          "x-gw-consume_by": "app/modeling/model_mapper.py:446"
         },
         "dispersion": {
           "type": "object",
@@ -254,13 +294,20 @@
         "porosity": {
           "description": "有效孔隙度。可以写成标量，也可以写成逐层数组（如 {\"value\": [0.3, 0.2]}，第 1 层在前，长度须等于 grid.nlay）。逐层时程序写 LAYERED，标量写 CONSTANT。"
         },
+        "initial_concentration": {
+          "description": "初始浓度 (mg/L)。写进 GWT 的 IC 包。不写按 0 处理。（此字段原先漏在 schema 里，2026-10-12 补上 —— 程序一直在读它。）",
+          "x-gw-status": "implemented",
+          "x-gw-consume_by": "app/modeling/model_mapper.py:626, app/modeling/model_builder.py:981"
+        },
         "advection": {
           "type": "object",
           "properties": {
             "scheme": {
               "type": "string",
               "enum": ["upstream", "central", "tvd"],
-              "default": "upstream"
+              "default": "upstream",
+              "x-gw-status": "implemented",
+              "x-gw-consume_by": "app/modeling/model_mapper.py:447,617"
             }
           }
         },
@@ -288,7 +335,11 @@
                               "description": "半衰期 t½，单位 d。程序按 λ = ln2/t½ 换算，**不要**在 IR 里自行换算成 λ（界面上会显示换算结果）。"}
               }
             },
-            "rt3d_package": {"type": "string"}
+            "rt3d_package": {
+              "type": "string",
+              "description": "RT3D 反应包名（历史遗留字段）",
+              "x-gw-status": "not_implemented"
+            }
           }
         }
       }
@@ -308,13 +359,20 @@
             "hclose": {"type": "number", "default": 1e-5},
             "rclose": {"type": "number", "default": 1e-3},
             "max_iter": {"type": "integer", "default": 100},
-            "relax": {"type": "number", "default": 1.0}
+            "relax": {
+              "type": "number", "default": 1.0,
+              "description": "松弛因子",
+              "x-gw-status": "implemented",
+              "x-gw-consume_by": "app/modeling/model_mapper.py:676"
+            }
           }
         }
       }
     },
     "output": {
       "type": "object",
+      "description": "输出控制。**整段当前无人读取** —— 输出哪些量是程序按模拟类型自己决定的，写了也不生效。",
+      "x-gw-status": "not_implemented",
       "properties": {
         "head": {"type": "boolean", "default": true},
         "drawdown": {"type": "boolean", "default": true},
@@ -338,6 +396,8 @@
     },
     "metadata": {
       "type": "object",
+      "description": "溯源与校验记录。**整段当前无人读取**（写进去不会影响建模，也不会出现在界面上）。",
+      "x-gw-status": "not_implemented",
       "properties": {
         "created_by": {"type": "string"},
         "validation_status": {

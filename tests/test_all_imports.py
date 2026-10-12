@@ -179,10 +179,13 @@ except Exception as e:
     check("result_processor", False, str(e))
 
 try:
-    from app.analysis.visualization_engine import VisualizationEngine
-    check("visualization_engine", True)
+    # 模块真名是 visualizer（不是 visualization_engine）。这里曾写错四个月，
+    # 又因为 gradio_app 当年在 import 时重绑 sys.stdout 吞掉了本文件全部输出，
+    # 红了也看不见病灶（见 tests/test_session_isolation.py 第 7 节）。
+    from app.analysis.visualizer import VisualizationEngine
+    check("visualizer", True)
 except Exception as e:
-    check("visualization_engine", False, str(e))
+    check("visualizer", False, str(e))
 
 try:
     from app.analysis.report_generator import ReportGenerator

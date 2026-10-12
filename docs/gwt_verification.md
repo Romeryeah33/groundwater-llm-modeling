@@ -202,7 +202,7 @@ tests/test_physics_engine.py             全部通过
 tests/test_boundary_pairs.py             56/56  通过
 tests/test_error_handling.py             23/23  通过 (100.0%)
 tests/test_subsystem_integration.py      90/90  通过 (100.0%)  ← 方位约定修正后由 89/90 转全通过
-tests/test_all_imports.py                30/31  通过 (96.8%)  ← 既有失败
+tests/test_all_imports.py                31/31  通过 (100.0%)  ← 2026-10-12 修正笔误后转全通过（原 30/31）
 ```
 
 ```bash
@@ -214,9 +214,15 @@ python scripts/verify_east_texas.py D      # Case D：源区回归锁，只构�
 / `classify_intent` 会走网络），Mock IR 每次运行内容不同，故该套件的总数会在 89~90 之间浮动；
 2026-09-17 复跑为 90/90。
 
-一项既有失败与本轮无关：
+**已收敛的既有失败**（2026-10-12，阶段 C）：
 
-- `test_all_imports` 的 30/31，在 Git HEAD 上即失败。
+- `test_all_imports` 的 30/31 —— 根因是测试自己写错了模块名
+  （`app.analysis.visualization_engine`，真名是 `app.analysis.visualizer`，
+  没有 `_engine` 后缀），并非程序缺陷。已修，现为 **31/31**。
+  之所以红了四个月没人能治，是因为 `gradio_app` 当年在 **import 时重绑
+  `sys.stdout`**，把本文件此前缓冲的 24 个 ✅ 和那 1 个 ❌ 全部吞掉 ——
+  病灶看不见。两处现已各自上锁：可见性见 `tests/test_session_isolation.py`
+  第 7 节，模块名见 `tests/test_all_imports.py`。
 
 ---
 

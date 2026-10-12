@@ -1456,7 +1456,6 @@ class AutoModelBuilder:
             "success": True,
             "head_range": head_range,
             "output_path": str(self.workspace / sim_name),
-            "transport_degraded": self._transport_degraded,
             # 构建期攒下的、用户应当看见的提示（原先只有 logger，到不了界面）
             "build_warnings": list(self._build_warnings),
             # 实际写进 MST/DSP 的运移参数与来源，供界面逐项核对
