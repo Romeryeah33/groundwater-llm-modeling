@@ -329,3 +329,7 @@ if failed == 0:
 else:
     print(f"⚠️ {failed} 项测试失败")
 print("=" * 60)
+
+# 失败即返回非零退出码 —— 否则"看 rc 判断红绿"的回归脚本会把失败当通过。
+# 同类问题与来龙去脉见 docs/后续开发计划20261010.md「二、挂起的任务」第 5 条。
+sys.exit(1 if failed else 0)

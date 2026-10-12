@@ -928,3 +928,7 @@ else:
 
 print(f"\n对话历史调整已生效: _format_history_for_llm 20→40条 (10→20轮)")
 print(f"                       _build_context_str    6→20条  (3→10轮)")
+
+# 失败即返回非零退出码 —— 否则"看 rc 判断红绿"的回归脚本会把失败当通过。
+# 同类问题与来龙去脉见 docs/后续开发计划20261010.md「二、挂起的任务」第 5 条。
+sys.exit(1 if failed else 0)
