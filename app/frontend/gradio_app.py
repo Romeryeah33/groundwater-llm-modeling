@@ -1585,15 +1585,24 @@ def _generate_code_preview(result: dict, json_ir: dict, workspace) -> str:
 
     # 储水
     atype = aqua.get("type", "confined") if isinstance(aqua, dict) else "confined"
+    # 稳态开关按 IR 实际取值渲染：恒显 True 会让瞬态模型也显示成稳态，
+    # 用户拿这一栏核对参数时会被误导。默认值 True 与 model_mapper 保持一致。
+    _sp = json_ir.get("stress_periods")
+    if isinstance(_sp, dict):
+        _steady = bool(_sp.get("steady_state", True))
+    elif isinstance(_sp, bool):
+        _steady = _sp
+    else:
+        _steady = True
     lines.append("# ===== 储水 (STO) =====")
     if atype == "confined":
         ss_val = _extract_val(params.get("ss", {}))
         lines.append(f"ss = {ss_val}  # 储水系数 1/m")
-        lines.append(f"sto = flopy.mf6.ModflowGwfsto(gwf, ss=ss, steady_state={{True}})")
+        lines.append(f"sto = flopy.mf6.ModflowGwfsto(gwf, ss=ss, steady_state={{{_steady}}})")
     else:
         sy_val = _extract_val(params.get("sy", {}))
         lines.append(f"sy = {sy_val}  # 给水度")
-        lines.append(f"sto = flopy.mf6.ModflowGwfsto(gwf, sy=sy, steady_state={{True}})")
+        lines.append(f"sto = flopy.mf6.ModflowGwfsto(gwf, sy=sy, steady_state={{{_steady}}})")
     lines.append("")
 
     # 边界条件

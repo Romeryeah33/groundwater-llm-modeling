@@ -688,7 +688,11 @@ if result_ghb["success"]:
 # --- I6.3: WEL 抽水井 ---
 print("\n--- I6.3: WEL ---")
 ir_wel = make_standard_ir()
-ir_wel["boundary_conditions"] = [
+# 抽水井**必须配水源**：把定水头边界整个替换成一口 WEL，等于"只出水不进水"，
+# 稳态下无解，MF6 会直接判不收敛。这条以前是"过"的，但那是因为程序把要求的稳态
+# 静默跑成了瞬态（瞬态有储水兜底）—— 缺陷见 tests/test_steady_state_lock.py。
+# 所以这里**追加**在原有边界之上，而不是替换掉。
+ir_wel["boundary_conditions"] = list(ir_wel["boundary_conditions"]) + [
     {"type": "wel", "name": "pumping_well", "parameters": {"rate": -100.0}},
 ]
 builder_wel = AutoModelBuilder(str(bc_workspace / "wel"))

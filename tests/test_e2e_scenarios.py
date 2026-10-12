@@ -379,11 +379,14 @@ ir4 = {
     ],
     "transport": {
         "enabled": True,
-        "parameters": {
+        # 规范化结构（此前写成 transport.parameters.* 是非规范写法，
+        # 导致 al 取不到、程序回退成网格尺度默认值 40 m 且 E2E-4 断言变红）：
+        #   弥散参数在 transport.dispersion 下，孔隙度在 transport 顶层。
+        #   ath1 不在这里 —— 它是程序按 ath1 = al * trpt 算出来的，IR 里给了也不读。
+        "porosity": {"value": 0.3, "unit": "dimensionless"},
+        "dispersion": {
             "al": {"value": 10.0, "unit": "m"},
             "trpt": {"value": 1.0, "unit": "m"},
-            "ath1": {"value": 0.0, "unit": "m"},
-            "porosity": {"value": 0.3, "unit": "dimensionless"},
         },
         "sources": [
             {"type": "constant_concentration", "name": "source_left_top",

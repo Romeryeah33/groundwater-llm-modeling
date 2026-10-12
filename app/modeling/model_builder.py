@@ -773,11 +773,14 @@ class AutoModelBuilder:
         sy = aquifer.get("sy", 0.15)
         ss = aquifer.get("ss", 1e-5)
         nper = int(mapped["time"].get("nper", 1) or 1)
-        is_transient = not bool(mapped["time"].get("steady_state", False))
-        # transient 必须逐应力期给出：只写 {0: ...} 时 MF6 会把其余应力期
-        # 按稳态处理（STO 未指定的 period 默认稳态）
-        transient = {i: is_transient for i in range(nper)}
+        is_steady = bool(mapped["time"].get("steady_state", False))
 
+        # 稳态开关**必须显式传给 FloPy**，否则稳态会被静默跑成瞬态。
+        # 实测（以 mf6 自己 .lst 的逐期判定为准，见 tests/test_steady_state_lock.py）：
+        #   steady_state=True  -> .sto 第 1 期块写 STEADY-STATE，后续期由 MF6 沿用 -> 判定稳态
+        #   什么都不写          -> 判定瞬态
+        #   transient={i:False} -> 判定瞬态（False 只是"不写关键字"，不是"写成稳态"）
+        # 旧代码只传 transient，于是"要稳态"的请求全部落进了第二、三行。
         flopy.mf6.ModflowGwfsto(
             gwf,
             ss=ss,
@@ -785,7 +788,8 @@ class AutoModelBuilder:
             # iconvert 需与 NPF 的 icelltype 一致，否则潜水/可转换类型的
             # 储水转换（SY↔SS）失效
             iconvert=icelltype,
-            transient=transient,
+            steady_state=is_steady,
+            transient={i: (not is_steady) for i in range(nper)},
         )
 
         # IC: 初始条件（逐层取层中点；统一写 top 会让上层初始水头高于下层顶板）

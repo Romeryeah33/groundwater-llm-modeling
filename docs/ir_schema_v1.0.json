@@ -251,7 +251,7 @@
       "type": "object",
       "description": "初始条件。当前只消费 `head`（稳态时用作初始水头猜测）。",
       "x-gw-status": "implemented",
-      "x-gw-consume_by": "app/modeling/model_builder.py:818, app/llm_agent/intent_parser.py:1138",
+      "x-gw-consume_by": "app/modeling/model_builder.py:822, app/llm_agent/intent_parser.py:1138",
       "properties": {
         "head": {
           "oneOf": [
@@ -297,7 +297,7 @@
         "initial_concentration": {
           "description": "初始浓度 (mg/L)。写进 GWT 的 IC 包。不写按 0 处理。（此字段原先漏在 schema 里，2026-10-12 补上 —— 程序一直在读它。）",
           "x-gw-status": "implemented",
-          "x-gw-consume_by": "app/modeling/model_mapper.py:626, app/modeling/model_builder.py:981"
+          "x-gw-consume_by": "app/modeling/model_mapper.py:626, app/modeling/model_builder.py:985"
         },
         "advection": {
           "type": "object",
