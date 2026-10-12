@@ -74,8 +74,10 @@ echo   Starting server, please wait...
 echo   (first load may take 90s for LiteLLM init)
 echo ==========================================
 
-REM -- Start Gradio in background --
-start "GW Server" /min "%PYTHON%" -m app.frontend.gradio_app
+REM -- Start server in background --
+REM 走统一入口：一个进程同时提供网页(7860)与 REST 接口(8000)。
+REM 两个入口共用一个会话表，于是"网页里聊出来的参数，接口里能直接跑"。
+start "GW Server" /min "%PYTHON%" -m app.main
 
 REM -- Wait for port 7860, but give up eventually so the real error is visible --
 echo Waiting for server to be ready...
@@ -101,7 +103,8 @@ goto :wait_port
 echo.
 echo ==========================================
 echo   Server is ready! Opening browser...
-echo   http://127.0.0.1:7860
+echo   网页: http://127.0.0.1:7860
+echo   接口: http://127.0.0.1:8000/docs
 echo ==========================================
 
 start "" http://127.0.0.1:7860

@@ -30,11 +30,9 @@ from app.knowledge.param_guide import render_missing_params_guidance
 from app.llm_agent.file_handler import file_handler
 from app.physics_engine.validator import quick_validate
 from app.modeling.model_builder import AutoModelBuilder
-from app.modeling.source_zone import (
-    SourceZoneUnresolved,
-    grid_dims,
-    materialize_source_zones,
-)
+# 建模前的三道闸：逻辑在 run_gates 里，REST 接口调的是**同一个**函数。
+# 原先这三道闸直接长在本文件里，抽出后这里只剩渲染那一半。
+from app.modeling.run_gates import apply_pregates, workspace_for_sid
 from app.analysis.visualizer import VisualizationEngine, visualizer
 from app.analysis.result_processor import ResultProcessor
 from app.utils.ir_normalize import merge_time_sources
@@ -98,7 +96,7 @@ def get_session(sid: str) -> DialogueManager:
 
 
 # ---- 会话编号：每个浏览器一个，互不串号 ----
-_SID_BAD = re.compile(r"[^A-Za-z0-9_-]")
+_SID_BAD = re.compile(r"[^A-Za-z0-9_-]")   # 保留：仅用于判断"消毒后是否为空"
 
 # BrowserState 用它签名后存进浏览器 localStorage。**必须是稳定值**：
 # 若用 Gradio 默认的随机 secret，服务器一重启就解不开旧值，
@@ -111,9 +109,14 @@ def _sanitize_sid(raw) -> str:
     """
     会话编号会被拼进路径（data/sessions/{sid}.json、workspace/run_{sid}），
     所以只留 [A-Za-z0-9_-]，其余一律剔除 —— 否则就是路径穿越。
+
+    白名单本身在 `session_registry.sanitize_sid`（接口走的是同一个函数，
+    两个入口不能各有一套过滤规则）。这里只加**界面自己的**那一步：
+    消毒后为空就现发一个随机编号 —— 对界面而言"空"意味着一个还没被分配过
+    编号的匿名访客，给他一个独立的编号即可。
+    （接口那边相反：空编号要报错，否则每次请求都新建会话。）
     """
-    s = _SID_BAD.sub("", str(raw or ""))[:40]
-    return s or uuid.uuid4().hex[:12]
+    return session_registry.sanitize_sid(raw) or uuid.uuid4().hex[:12]
 
 
 def _ensure_sid(stored, request: gr.Request):
@@ -1181,35 +1184,57 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
         return empty_fig, "<p>请先在左侧对话区输入建模需求，完成参数补全后再开始建模</p>", empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 
     # ================================================================
-    # 建模前缺失参数检测（阻断建模前提醒用户）
+    # 建模前的三道闸 —— 逻辑在 app/modeling/run_gates.py，接口调的是同一个函数。
+    # 这里只负责**界面那一半**：打 monitor 日志、把结果渲染成卡片。
+    # 判定条件与顺序一概不在这里写，避免界面与接口各有一套而悄悄漂移。
     # ================================================================
+    dm = get_session(sid)
+
     monitor.step("Step 1/3: 缺失参数检测")
-    missing = intent_parser.detect_missing_params(json_ir)
+    gates = apply_pregates(
+        json_ir,
+        uploaded_paths=dm.state.get("_uploaded_file_paths", []),
+        file_index=(dm.state.get("file_uploads") or {}).get("shapefiles", {}),
+    )
+    missing = gates["missing"]
     p1_missing = missing.get("priority_1", [])
     p2_missing = missing.get("priority_2", [])
     p3_missing = missing.get("priority_3", [])
     monitor.info(f"P1缺失={len(p1_missing)}, P2缺失={len(p2_missing)}, P3缺失={len(p3_missing)}")
+    json_ir = gates["ir"]
 
-    if p1_missing or p2_missing:
+    # 闸门**自己炸了**（不是"查出问题"）—— 必须与被拦区分开。
+    # 少了这一步，quick_validate 抛异常时界面会显示"发现 0 个错误"：
+    # 一句自相矛盾、并且把人引向错误方向的话。
+    if gates.get("gate_error") and gates["stage"] in ("missing", "validate"):
+        monitor.capture_error(
+            RuntimeError(gates["gate_error"]), f"{gates['stage']} 闸")
+        _title = {"missing": "缺失参数检测失败",
+                  "validate": "参数校验失败"}[gates["stage"]]
+        return empty_fig, callout("err", _title,
+                                  f"<pre>{gates['gate_error']}</pre>"), empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
+
+    if gates["stage"] == "missing":
         monitor.warn(f"存在关键缺失参数: P1={p1_missing}, P2={p2_missing}")
-        warning_html = render_missing_params_guidance(p1_missing, p2_missing, p3_missing, format="html")
+        warning_html = render_missing_params_guidance(
+            p1_missing, p2_missing, p3_missing, format="html")
         return empty_fig, warning_html, empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 
     monitor.step("Step 2/3: 物理参数校验")
-    try:
-        val_result = quick_validate(json_ir)
-        monitor.info(f"校验结果: valid={val_result.get('valid')}, errors={val_result.get('error_count')}, warnings={val_result.get('warning_count')}")
-    except Exception as e:
-        monitor.capture_error(e, "物理参数校验")
-        return empty_fig, callout("err", "参数校验失败", f"{e}"), empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
+    val_result = gates["validation"]
+    monitor.info(f"校验结果: valid={val_result.get('valid')}, "
+                 f"errors={val_result.get('error_count')}, "
+                 f"warnings={val_result.get('warning_count')}")
 
-    if val_result["error_count"] > 0:
+    if gates["stage"] == "validate":
+        n_err = val_result.get("error_count", 0)
         issues = "\n".join(
             f"  {i['param_name']}: {i['description']}"
-            for i in val_result["issues"] if i.get("severity") == "error"
+            for i in val_result.get("issues", []) if i.get("severity") == "error"
         )
-        monitor.warn(f"校验发现 {val_result['error_count']} 个错误")
-        return empty_fig, callout("err", f"参数校验发现 {val_result['error_count']} 个错误", f"<pre>{issues}</pre>"), empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
+        monitor.warn(f"校验发现 {n_err} 个错误")
+        return empty_fig, callout("err", f"参数校验发现 {n_err} 个错误",
+                                  f"<pre>{issues}</pre>"), empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40)
 
     # 警告不阻断建模，但**必须可见**（此前只渲染错误，警告数只进 monitor 计数）
     warn_html = _warning_card_html(val_result)
@@ -1218,30 +1243,15 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
             f"校验警告 {val_result.get('warning_count', 0)} 条（已显示在结果面板）"
         )
 
-    # ================================================================
-    # 源区定位闸（置于建模前，避免把点源静默放大成全域面源）
-    # ================================================================
+    # ---- 闸 3 的界面半边：源区定位（阻断 + 摘要展示）----
     # East Texas 案例的污染羽之所以看起来像水流模型结果，根因就在这里：
     # 填埋场只占 132 格（0.59%），但带浓度的 RCH 边界找不到注入位置时，
     # 旧代码会**静默**展开成 layer0 全网格（22454 格），源被放大 170 倍。
     # 现在解析不出位置就**硬拒绝**，把原因与三条出路直接摆给用户。
-    source_zone_rows = []
-    try:
-        dm = get_session(sid)
-        sz_ir, sz_resolved, sz_issues = materialize_source_zones(
-            json_ir,
-            uploaded_paths=dm.state.get("_uploaded_file_paths", []),
-            file_index=(dm.state.get("file_uploads") or {}).get("shapefiles", {}),
-        )
-    except SourceZoneUnresolved as e:
-        sz_issues = [("?", str(e))]
-        sz_resolved = {}
-    except Exception as e:
-        monitor.capture_error(e, "源区定位")
-        sz_issues = [("?", f"源区定位时发生意外错误：{e}")]
-        sz_resolved = {}
+    source_zone_rows = gates["source_zone_rows"]
 
-    if sz_issues:
+    if gates["stage"] == "source_zone":
+        sz_issues = gates["source_zone_issues"]
         monitor.warn(f"源区定位失败: {[n for n, _ in sz_issues]}")
         detail = "\n\n".join(f"【{n}】\n{msg}" for n, msg in sz_issues)
         return (
@@ -1253,34 +1263,12 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
             empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40),
         )
 
-    if sz_resolved:
+    if gates["source_zones"]:
         # 结果已物化进 IR（geometry.grid_indices），写回会话，重跑不必依赖上传文件
         dm.state["json_ir"] = json_ir
         dm.save_session(sid)
-        _grid = json_ir.get("grid", {}) or {}
-        _total = max(int(_grid.get("nrow", 1) or 1) * int(_grid.get("ncol", 1) or 1), 1)
-        _nrow, _ncol, _delr, _delc, _ = grid_dims(_grid)
-        # 补给量 = 格数 × 单格面积 × 速率。单格面积取 delr/delc 的均值乘积，
-        # 不写死 20×20 —— 换个网格就是另一个数。
-        _cell_area = float(np.mean(_delr)) * float(np.mean(_delc))
-        for _n, _r in sz_resolved.items():
-            _cells = len(_r.get("grid_indices") or [])
-            _rate = None
-            for _bc in json_ir.get("boundary_conditions", []) or []:
-                if isinstance(_bc, dict) and _bc.get("name") == _n:
-                    _raw = (_bc.get("parameters") or {}).get("rate")
-                    _rate = _raw.get("value") if isinstance(_raw, dict) else _raw
-                    break
-            try:
-                _flux_txt = f"，补给 {_cells * float(_rate) * _cell_area:.2f} m³/d"
-            except (TypeError, ValueError):
-                _flux_txt = ""
-            source_zone_rows.append(
-                f"源区 '{_n}': {_cells} 格 (占全域 {_cells/_total*100:.2f}%)，"
-                f"面积 {_r.get('area_m2', 0):.0f} m²{_flux_txt}"
-                f"，来源 {_r.get('resolved_from', '?')}"
-            )
-            monitor.info(source_zone_rows[-1])
+        for _row in source_zone_rows:
+            monitor.info(_row)
 
     monitor.step("Step 3/3: FloPy 建模与 MODFLOW 6 模拟")
 
@@ -1290,8 +1278,9 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
     logger.info(f"[RUN_MODEL] transport.enabled={json_ir.get('transport', {}).get('enabled')}")
     logger.info(f"[RUN_MODEL] transport={json_ir.get('transport', {})}")
 
-    workspace = settings.workspace_dir / f"run_{sid}" if sid else settings.workspace_dir / "run_default"
-    workspace.mkdir(parents=True, exist_ok=True)
+    # 目录规则与接口共用同一个函数 —— 各算各的会让同一个 sid 的两个入口
+    # 写进两个目录，结果对不上
+    workspace = workspace_for_sid(sid)
 
     try:
         builder = AutoModelBuilder(str(workspace))

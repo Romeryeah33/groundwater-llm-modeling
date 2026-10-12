@@ -15,11 +15,17 @@ pip install -r requirements.txt
 # Initialize the semantic database (required once)
 python scripts/init_semantic_db.py
 
-# Run the main Gradio frontend (http://127.0.0.1:7860)
+# Run web UI + REST API together, one process (recommended)
+#   UI  http://127.0.0.1:7860
+#   API http://127.0.0.1:8000/docs
+python -m app.main
+
+# Run the Gradio frontend alone (no REST API)
 python -m app.frontend.gradio_app
 
-# Run the FastAPI backend standalone
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+# Run the REST API alone (no web UI)
+#   GW_WITH_UI=0 uvicorn app.main:app --host 127.0.0.1 --port 8000
+GW_WITH_UI=0 uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 # Run specific test suites
 python tests/test_llm_agent_import.py       # LLM agent modules

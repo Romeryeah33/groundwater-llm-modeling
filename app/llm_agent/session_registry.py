@@ -27,6 +27,7 @@
 
 import collections
 import logging
+import re
 import threading
 from typing import Optional
 
@@ -35,6 +36,40 @@ from app.llm_agent.intent_parser import IntentParser
 from app.llm_agent.dialogue_manager import DialogueManager
 
 logger = logging.getLogger(__name__)
+
+
+# 会话编号会被拼进两个文件系统路径：`data/sessions/{sid}.json` 与
+# `workspaces/run_{sid}`。**不消毒就是路径穿越** —— 一个 `../../` 就能让
+# 请求方决定往哪儿写。
+_SID_BAD = re.compile(r"[^A-Za-z0-9_-]")
+_SID_MAX = 64
+
+
+def sanitize_sid(raw) -> str:
+    """白名单过滤：只留 `[A-Za-z0-9_-]`，其余**删除**。可能返回空串。
+
+    为什么用白名单而不是剔除 `..` 和 `/`：黑名单永远漏（`..\\`、URL 编码、
+    全角字符……），而白名单只要"不认识的就不放行"。
+
+    为什么是**删除**而不是替换成 `_`：替换会让 `a/b` 和 `a_b` 撞成同一个
+    编号 —— 两个不同的浏览器共用一份会话，正是本轮要修的毛病。删除则
+    `__a__` 与 `a` 仍然不同。
+
+    **不替调用方决定空串怎么办**，因为两边答案相反：界面空串要发一个新编号
+    （每个匿名访客各自独立），接口空串应当直接报错（否则每次请求都新建一个
+    会话，用户永远接不上上一轮）。
+    """
+    return _SID_BAD.sub("", str(raw or ""))[:_SID_MAX]
+
+
+def _require_sid(sid) -> str:
+    """注册表内部的兜底：消毒后为空就是调用方漏了决策，**要响**不要静默。"""
+    s = sanitize_sid(sid)
+    if not s:
+        raise ValueError(
+            f"会话编号 {sid!r} 消毒后为空 —— 调用方必须自己决定空串怎么处理"
+            "（界面发新编号 / 接口报 400），不能交给注册表猜。")
+    return s
 
 
 class _Bundle:
@@ -117,6 +152,7 @@ def get(sid: str, *, restore: bool = True) -> DialogueManager:
     注意 `restore`：内部测试/探针请传 False，否则会去读真实的
     `data/sessions/{sid}.json`。
     """
+    sid = _require_sid(sid)
     with _LOCK:
         b = _BUNDLES.get(sid)
         if b is None:
@@ -139,6 +175,7 @@ def configure(sid: str, *, api_key: Optional[str] = None,
     换密钥会重建三层对象，但**已有对话与参数不丢**——旧 state 原样搬过去。
     空字符串（界面输入框被清空）视同"没给"，回落到服务器默认。
     """
+    sid = _require_sid(sid)
     api_key = (api_key or "").strip() or None
     model = (model or "").strip() or None
     api_base = (api_base or "").strip() or None
@@ -159,16 +196,27 @@ def configure(sid: str, *, api_key: Optional[str] = None,
 
 
 def has_custom_key(sid: str) -> bool:
-    """界面回显用：该会话是否已经用了用户自填的密钥。不吐密钥本身。"""
+    """界面回显用：该会话是否已经用了用户自填的密钥。不吐密钥本身。
+
+    这里**不报错**（与 get/configure 不同）：编号不认识就等于"没有自填密钥"，
+    回显一句"用的是服务器默认"即可，没必要为此让页面炸掉。
+    """
+    s = sanitize_sid(sid)
     with _LOCK:
-        b = _BUNDLES.get(sid)
+        b = _BUNDLES.get(s) if s else None
         return bool(b and b.has_custom_key)
 
 
 def drop(sid: str) -> None:
-    """释放一个会话（内存回收）。磁盘上的会话文件不动。"""
+    """释放一个会话（内存回收）。磁盘上的会话文件不动。
+
+    同样不报错 —— 这是清理路径，编号本来就可能已经不存在了。
+    """
+    s = sanitize_sid(sid)
+    if not s:
+        return
     with _LOCK:
-        _BUNDLES.pop(sid, None)
+        _BUNDLES.pop(s, None)
 
 
 def active_sids() -> list[str]:

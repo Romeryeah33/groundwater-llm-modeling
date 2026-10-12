@@ -57,6 +57,11 @@ class LLMClient:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        # 请求超时（LLM_REQUEST_TIMEOUT，默认 120 s）。
+        # 此前 settings.llm_request_timeout 定义了却**从没传下来**，于是请求无限等待：
+        # 对界面而言只是"转圈很久"，对 REST 接口却是**工作线程被永久占住** ——
+        # 有一个卡住的请求，后面所有请求都排在它后面。
+        kwargs["timeout"] = settings.llm_request_timeout
         if self.api_key:
             kwargs["api_key"] = self.api_key
         if self.api_base:
