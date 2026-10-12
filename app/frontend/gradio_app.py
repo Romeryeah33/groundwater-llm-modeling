@@ -1705,7 +1705,8 @@ def create_ui():
                                   elem_classes=["gw-acc"]):
                     gr.Markdown(
                         "留空即使用服务器已配置的密钥。填入后只存在服务器内存中，"
-                        "**不写入磁盘、不记入日志**；刷新页面或重启程序后需重新填写。")
+                        "**不写入磁盘、不记入日志**；重启程序后需重新填写"
+                        "（刷新页面不受影响 —— 会话编号存在你的浏览器里）。")
                     api_key_box = gr.Textbox(label="LLM API Key", type="password",
                                              placeholder="sk-...", lines=1)
                     with gr.Row():
