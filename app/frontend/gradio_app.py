@@ -59,6 +59,27 @@ import copy
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ---- 调试类界面：默认对使用者隐藏 ----
+# 「流水线追踪」日志面板与「图件修改」页签是给作者调试用的，使用者不需要。
+# 更要紧的是它们**底层是全局单例**（monitor / plot_styler），多人同时用会互相
+# 看见对方的日志与图件状态 —— 会话编号修好了也治不到这一层，所以直接不给入口。
+# 需要时设 GW_SHOW_DEBUG_PANELS=1 打开（仓库附了「启动程序-调试模式.bat」）。
+#
+# 注意：这里用 visible=False **而不是把组件删掉** —— debug_log 是「开始建模」
+# 按钮的输出目标之一，删掉组件会让那条事件绑定的元素个数对不上。
+
+
+def _debug_panels_enabled(raw: str) -> bool:
+    """GW_SHOW_DEBUG_PANELS 的取值解析。抽出成函数是为了能被测试直接锁住。
+
+    只有明确写成 1 / true / yes / on 才算开；空值、0、随便别的字符串都算关
+    —— 默认关是安全的一侧，"设了个看不懂的值"不应该意外把面板打开。
+    """
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+SHOW_DEBUG_PANELS = _debug_panels_enabled(os.getenv("GW_SHOW_DEBUG_PANELS", "0"))
+
 # ---- 调试监控器 ----
 from app.utils.debug_monitor import monitor
 logger.info("调试监控器已启用 — 日志: %s", monitor.get_log_file_path())
@@ -1825,7 +1846,7 @@ def create_ui():
             with gr.TabItem("过程分析"):
                 gr.HTML(panel_header("主控过程贡献", "Process Contribution", "beaker"))
                 process_plot = gr.Plot(label="主控过程贡献", elem_classes=["gw-plot"])
-            with gr.TabItem("图件修改"):
+            with gr.TabItem("图件修改", visible=SHOW_DEBUG_PANELS):
                 gr.HTML(panel_header("自然语言图件修饰", "Natural-language Styling", "image"))
                 gr.Markdown("用一句话描述想要的改动，系统会在当前图件上应用：\n\n"
                            "> *\"把颜色改成蓝色系，等值线间隔设为 2 m\"*\n>\n"
@@ -1883,8 +1904,10 @@ def create_ui():
             [param_table, param_panel, missing_params]
         )
 
-        # ---- 调试日志面板 ----
-        with gr.Accordion("流水线追踪 (debug log)", open=False, elem_classes=["gw-acc"]):
+        # ---- 调试日志面板（默认隐藏，见 SHOW_DEBUG_PANELS）----
+        # 组件照建、照绑定，只是不显示 —— monitor 是全局单例，会显示别人的日志。
+        with gr.Accordion("流水线追踪 (debug log)", open=False,
+                          visible=SHOW_DEBUG_PANELS, elem_classes=["gw-acc"]):
             debug_log = gr.Textbox(
                 label=f"实时管道追踪 — 完整日志: {monitor.get_log_file_path()}",
                 value="等待操作...",

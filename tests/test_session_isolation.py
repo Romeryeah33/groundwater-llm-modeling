@@ -29,6 +29,9 @@
   6. 会话编号经过**消毒**，不能拼出路径穿越。
   7. 模块导入**不再改写全局 stdout**（改写的后果：导入方的输出被吞；反复导入会
      把底层 buffer 关掉，后续 print 抛 `I/O operation on closed file`）。
+  8. 两个**全局单例**界面（`monitor` 调试面板、`plot_styler`「图件修改」Tab）
+     对使用者隐藏 —— 隐藏是 `visible=False` 而**不是删除**，所以还要锁住
+     "组件仍在、绑定仍在"，否则"隐藏"会退化成断线。
 
 脚本风格，不用 pytest：``python tests/test_session_isolation.py``
 """
@@ -230,6 +233,49 @@ assert _pwd, "界面上没有 LLM API Key 输入框"
 assert getattr(_pwd[0], "type", None) == "password", \
     "密钥输入框必须是 password 类型 —— 否则明文显示在屏幕上"
 _ok("密钥输入框存在且是 password 类型（不明文显示）")
+
+# ================================================================
+print("\n6a. 两个全局单例面板对使用者隐藏（A1b）...")
+# ================================================================
+# 这两个组件挂在全局单例上（monitor / plot_styler），多人同时用会互相看见。
+# 处置是 visible=False 而**不是删掉** —— debug_log 是运行按钮的输出目标，
+# 删了绑定就断。所以这里两件事都要锁：默认不显示、但组件仍然存在且有绑定。
+_blocks = demo.blocks
+
+_acc = [c for c in _blocks.values()
+        if type(c).__name__ == "Accordion"
+        and "流水线追踪" in str(getattr(c, "label", ""))]
+assert _acc, "找不到「流水线追踪」调试面板（被改名或删掉了？）"
+assert _acc[0].visible is False, \
+    "调试面板默认可见 —— 使用者会看到别人的日志（monitor 是全局单例）"
+_ok("「流水线追踪」调试面板默认隐藏")
+
+_tab = [c for c in _blocks.values()
+        if type(c).__name__ in ("Tab", "TabItem")   # gradio 6 内部类名是 Tab
+        and str(getattr(c, "label", "")) == "图件修改"]
+assert _tab, "找不到「图件修改」Tab"
+assert _tab[0].visible is False, \
+    "「图件修改」Tab 默认可见 —— 会串用户（plot_styler 是全局单例）"
+_ok("「图件修改」Tab 默认隐藏")
+
+# 关键：隐藏≠删除。debug_log 必须仍然存在、仍然是某个函数的输出。
+_dbg = [c for c in _blocks.values()
+        if type(c).__name__ == "Textbox"
+        and "实时管道追踪" in str(getattr(c, "label", ""))]
+assert _dbg, \
+    "debug_log 组件不见了 —— 它是运行按钮的输出目标，删掉会让绑定报错"
+_dbg_id = _dbg[0]
+_dbg_bound = any(_dbg_id in (getattr(f, "outputs", None) or [])
+                 for f in demo.fns.values())
+assert _dbg_bound, "debug_log 还在，但已经没有任何函数往它写 —— 绑定断了"
+_ok("debug_log 组件仍存在且仍有输出绑定（隐藏不是删除）")
+
+# 开关本身：默认关，显式置 1 才开
+_parse = ga._debug_panels_enabled
+assert _parse("1") is True and _parse("true") is True
+assert _parse("") is False and _parse("0") is False and _parse("no") is False
+_ok("开关解析正常（只有 1/true 之类才开，空值=关）")
+
 
 # ================================================================
 print("\n6b. 走 gradio_app.get_session 的集成级隔离（不是只测注册表）...")
