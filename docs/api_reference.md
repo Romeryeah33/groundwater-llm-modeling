@@ -201,7 +201,13 @@ curl http://127.0.0.1:8000/api/model/status/3f9c2a1b8e04
 | `reaction_effective` | object | 实际生效的反应参数 |
 | `build_warnings` | array | 建模过程中的警告（如"多组分已按一级降解处理"） |
 | `source_zone_rows` | array | 点源被物化成的网格行列表 |
+| `boundary_warnings` | array | **定不出位置的边界清单**（CHD/GHB/RIV/DRN）。这些边界**不会写进模型**，但模型照常跑完 —— 只给警告、不阻断建模。每条是可直接展示的中文说明 |
 | `files` | array | 结果文件清单，见下 |
+
+> ⚠️ **`boundary_warnings` 非空时，结果的物理意义是不完整的。** 例如某条定水头边界
+> 因名字里没有方位词、也没给 `position` 而落不下去时，模型是在**缺少该边界**的条件下
+> 跑出来的 —— 可能退化成平凡解（水头=初始值）。请根据提示补上 `position`
+> （`west`/`east`/`north`/`south`，或 `西`/`东`/`南`/`北`）后重跑。
 
 `summary` 的键（实测）：
 

@@ -203,7 +203,7 @@
             "type": "array",
             "description": "该边界随应力期变化的取值。**这是活字段**（初稿的标注清单曾把它误列为未实现，实测被 model_mapper 读取）。",
             "x-gw-status": "implemented",
-            "x-gw-consume_by": "app/modeling/model_mapper.py:267",
+            "x-gw-consume_by": "app/modeling/model_mapper.py:286",
             "items": {
               "type": "object",
               "properties": {
@@ -280,7 +280,7 @@
           "items": {"type": "string"},
           "description": "溶质组分列表",
           "x-gw-status": "implemented",
-          "x-gw-consume_by": "app/modeling/model_mapper.py:446"
+          "x-gw-consume_by": "app/modeling/model_mapper.py:463"
         },
         "dispersion": {
           "type": "object",
@@ -297,7 +297,7 @@
         "initial_concentration": {
           "description": "初始浓度 (mg/L)。写进 GWT 的 IC 包。不写按 0 处理。（此字段原先漏在 schema 里，2026-10-12 补上 —— 程序一直在读它。）",
           "x-gw-status": "implemented",
-          "x-gw-consume_by": "app/modeling/model_mapper.py:626, app/modeling/model_builder.py:985"
+          "x-gw-consume_by": "app/modeling/model_mapper.py:643, app/modeling/model_builder.py:985"
         },
         "advection": {
           "type": "object",
@@ -307,7 +307,7 @@
               "enum": ["upstream", "central", "tvd"],
               "default": "upstream",
               "x-gw-status": "implemented",
-              "x-gw-consume_by": "app/modeling/model_mapper.py:447,617"
+              "x-gw-consume_by": "app/modeling/model_mapper.py:464,634"
             }
           }
         },
@@ -363,7 +363,7 @@
               "type": "number", "default": 1.0,
               "description": "松弛因子",
               "x-gw-status": "implemented",
-              "x-gw-consume_by": "app/modeling/model_mapper.py:676"
+              "x-gw-consume_by": "app/modeling/model_mapper.py:693"
             }
           }
         }

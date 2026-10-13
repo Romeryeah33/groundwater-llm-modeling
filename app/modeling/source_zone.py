@@ -60,6 +60,35 @@ SOUTH_KEYWORDS = ("south", "南", "下", "bottom", "ymin")
 # 静默变成整条北边界 —— 这里把它挡掉，让源区解析器去处理。
 NO_EDGE_INFERENCE_TYPES = ("rch", "evt", "wel")
 
+# 这些包**必须有**整条边界的位置：定不出来就等于**没有边界**（不是缩小，是消失）。
+# 一个没有定水头的模型会退化成平凡解（head=初始值，秒收敛）或干脆不收敛，
+# 而 `build_and_run` 两种情况下都返回 `success=True`。
+#
+# `wel` 不在其列 —— 井没有位置时有"放模型中心"的兜底（model_mapper 里）。
+# `rch`/`evt` 也不在 —— 它们由源区闸（`materialize_source_zones`）负责定位，
+# 解析不出会**硬拒绝**。
+EDGE_REQUIRED_TYPES = ("chd", "ghb", "riv", "drn")
+
+# 顺流向的词汇 —— 描述的是"沿水流方向"，不是"南北东西"。
+#
+# 实测（见 tests/test_boundary_placement_lock.py）：名为 `上游定水头` 的 CHD 因含
+# "上" 被判成**北边界**（写到网格最北那一排），`下游边界` 被判成南边界 ——
+# 而"上/下游"与南北毫无关系，这个落点是纯属巧合的误命中。
+#
+# 处理方式是**匹配方位前先把这些词从名字里剔除**，而不是"一见到流向词就放弃"：
+#   "上游定水头" -> "定水头" -> 无方位词 -> 定位存疑（由调用方警告）
+#   "上游西边界" -> "西边界" -> west     -> 正常推断出来
+FLOW_DIRECTION_WORDS = ("上游", "下游", "左岸", "右岸", "upstream", "downstream")
+
+
+def strip_flow_direction_words(name: str) -> str:
+    """剔除名字里的流向词（上游/下游/左岸/右岸），剩下的才拿去做方位匹配。"""
+    out = name or ""
+    for w in FLOW_DIRECTION_WORDS:
+        out = out.replace(w, "")
+    return out
+
+
 _EDGE_KEYWORDS = (
     (WEST_KEYWORDS, "west"),
     (EAST_KEYWORDS, "east"),
@@ -117,9 +146,10 @@ def grid_dims(grid: dict) -> tuple:
     return nrow, ncol, delr, delc, nlay
 
 
-def infer_edge_indices(bc_name: str, grid: dict, layer=None, bc_type: str = None) -> list:
+def infer_edge_indices(bc_name: str, grid: dict, layer=None, bc_type: str = None,
+                       position: str = None) -> list:
     """
-    从边界名称推断网格边界的 IJ 索引（west/east/north/south 及中英文同义词）。
+    从边界名称/显式方位推断网格边界的 IJ 索引（west/east/north/south 及中英文同义词）。
 
     行号约定：**row 0 在南、row nrow-1 在北**（与 `grid_coords.grid_cell_centers`
     的 y 递增方向、以及绘图时的"上北下南"一致）。列号：col 0 在西、col ncol-1 在东。
@@ -131,11 +161,18 @@ def infer_edge_indices(bc_name: str, grid: dict, layer=None, bc_type: str = None
             井排几乎不可能是本意，而一个叫 `top_of_landfill` 的补给边界今天会因
             方位关键词含 `"top"` 静默变成整条北边界（`left_bank` 变整条西边界同理）。
             这类名称应当交给源区解析器处理，而不是被方位推断"捡走"。
+        position: IR 里**显式声明**的方位（顶层 `position` 或 `geometry.position`，
+            调用方传进来）。**优先级高于 `bc_name`** —— 前者是"这条边界在哪"的直接
+            声明，后者只是命名习惯。
+
+            这个参数是补的一个真实缺陷：此前只认名字，于是
+            `{"name": "上游定水头", "position": "west"}` 里白纸黑字的 `west`
+            被完全无视，边界落到名字误命中的**北**边界上，无任何提示。
+            （East Texas 案例的 name 与 position 本来就一致，接通后结果不变。）
     """
     if bc_type in NO_EDGE_INFERENCE_TYPES:
         return []
 
-    name_lower = (bc_name or "").lower()
     nrow = int(_unwrap(grid.get("nrow"), 50) or 50)
     ncol = int(_unwrap(grid.get("ncol"), 50) or 50)
 
@@ -168,16 +205,96 @@ def infer_edge_indices(bc_name: str, grid: dict, layer=None, bc_type: str = None
     # 判据是与 SHP 对齐：landfill_arcs 在 y 上占 55.6%（3428453..3428678 落在
     # 3427412..3429283 内），栅格化后是 rows 52..62（中心 55%）—— 只有"row 越大
     # 越靠北"这一套能同时对上 SHP 坐标、可视化底图和 `.rch` 的实测行号。
-    if _word_match(name_lower, WEST_KEYWORDS):
-        _edge([(r, 0) for r in range(nrow)])
-    elif _word_match(name_lower, EAST_KEYWORDS):
-        _edge([(r, ncol - 1) for r in range(nrow)])
-    elif _word_match(name_lower, NORTH_KEYWORDS):
-        _edge([(nrow - 1, c) for c in range(ncol)])
-    elif _word_match(name_lower, SOUTH_KEYWORDS):
-        _edge([(0, c) for c in range(ncol)])
+    def _match(text) -> list:
+        """把一段文本映射到四条边之一；认不出返回 None（**不是**空列表）。"""
+        t = (text or "").strip().lower()
+        if not t:
+            return None
+        if _word_match(t, WEST_KEYWORDS):
+            return [(r, 0) for r in range(nrow)]
+        if _word_match(t, EAST_KEYWORDS):
+            return [(r, ncol - 1) for r in range(nrow)]
+        if _word_match(t, NORTH_KEYWORDS):
+            return [(nrow - 1, c) for c in range(ncol)]
+        if _word_match(t, SOUTH_KEYWORDS):
+            return [(0, c) for c in range(ncol)]
+        return None
+
+    # 顺序**即优先级**：显式 position > 名字。
+    # 名字先剔除流向词 —— 否则 "上游定水头" 会因 "上" 被误判成北边界。
+    for _text in (position, strip_flow_direction_words(bc_name)):
+        _cells = _match(_text)
+        if _cells is not None:
+            _edge(_cells)
+            return indices
 
     return indices
+
+
+def unplaced_boundaries(ir: dict) -> list:
+    """
+    找出**需要整条边界、却定不出位置**的边界。纯函数，不修改任何东西。
+
+    为什么需要它：这类边界不会被写成"小一点的边界"，而是**整个包都不生成** ——
+    `model_mapper.map_boundary_conditions` 推出的 `indices` 为空时，
+    `model_builder._build_boundary_packages` 直接 `continue` 跳过，
+    而 `build_and_run` 照样返回 `success=True`。用户拿到的是一个
+    **没有定水头边界**的模型：要么退化成平凡解（head=初始值，秒收敛），
+    要么根本不收敛 —— 两种都不会告诉用户"你的边界没生效"。
+
+    返回 `[{"name", "type", "position", "reason"}...]`，`reason` 是可直接展示的
+    中文。调用方（`run_gates.apply_pregates`）据此警告用户；**不阻断建模**
+    （2026-10-13 与用户确认：只警告、照旧放行）。
+
+    注意 `reason` 区分两种"定不出来"，因为给用户的建议不同：
+      - 给了 position 但认不出 -> 请改成 west/east/north/south 之一
+      - 名字里没有方位词，或只有流向词 -> 请补 position
+    """
+    grid = (ir or {}).get("grid", {}) or {}
+    out = []
+
+    for bc in (ir or {}).get("boundary_conditions", []) or []:
+        if not isinstance(bc, dict):
+            continue
+        bc_type = str(bc.get("type", "") or "").lower()
+        if bc_type not in EDGE_REQUIRED_TYPES:
+            continue
+
+        geometry = bc.get("geometry") if isinstance(bc.get("geometry"), dict) else {}
+        # 已有显式索引的边界不受影响 —— 那是优先级最高、也最可靠的定位方式
+        if geometry.get("grid_indices"):
+            continue
+
+        name = bc.get("name", "") or ""
+        position = bc.get("position") or geometry.get("position")
+
+        if infer_edge_indices(name, grid, bc_type=bc_type, position=position):
+            continue
+
+        cleaned = strip_flow_direction_words(name)
+        if position and not infer_edge_indices("", grid, bc_type=bc_type, position=position):
+            reason = (f"position='{position}' 认不出方位 —— "
+                      f"请改成 west/east/north/south 之一（或 西/东/南/北）")
+        elif cleaned != name and not _match_direction(cleaned):
+            reason = (f"名字 '{name}' 里只有流向词（{'/'.join(FLOW_DIRECTION_WORDS[:4])}），"
+                      f"那是顺水流方向、不是南北东西 —— 请补一个 position 字段")
+        else:
+            reason = (f"名字 '{name}' 里没有方位词 —— "
+                      f"请补一个 position 字段（west/east/north/south）"
+                      f"或把名字改成含方位词（如 west_boundary）")
+
+        out.append({"name": name, "type": bc_type,
+                    "position": position, "reason": reason})
+
+    return out
+
+
+def _match_direction(text: str) -> bool:
+    """这段文本里有没有**真正的**方位词（流向词已被剔除）。"""
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    return any(_word_match(t, kws) for kws, _edge_name in _EDGE_KEYWORDS)
 
 
 # ====================================================================

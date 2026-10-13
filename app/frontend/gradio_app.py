@@ -1163,6 +1163,28 @@ def _warning_card_html(val_result: dict) -> str:
     )
 
 
+def _boundary_warning_card_html(warnings) -> str:
+    """把"边界定不出位置"渲染成界面上可见的卡片。
+
+    这类边界**不会写入模型** —— 不是"小一点的边界"，而是整个包都不生成，
+    而 `build_and_run` 照样返回 `success=True`。用户会拿到一个少了定水头边界的
+    模型（退化成 head=初始值的平凡解，或者根本不收敛），却没有任何提示。
+
+    与 `_warning_card_html` 是同一类失效的同一个教训：**算得出、也生成了，
+    但没人看得见，等于没有**。按用户决定（2026-10-13）不阻断建模，但必须显形。
+    """
+    warnings = list(warnings or [])
+    if not warnings:
+        return ""
+    rows = "".join(f"<div>{w}</div>" for w in warnings)
+    return callout(
+        "warn",
+        f"边界未定位 {len(warnings)} 条 —— 这些边界不会写入模型",
+        rows + '<div class="gw-note">模型已照常运行，但上述边界未参与计算，'
+               "结果里看不到它们的作用。补齐位置后重跑即可。</div>",
+    )
+
+
 def run_model_handler(json_ir: dict, sid: str = "default"):
     """运行自动建模"""
     monitor.step("===== 开始建模 =====")
@@ -1243,6 +1265,13 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
             f"校验警告 {val_result.get('warning_count', 0)} 条（已显示在结果面板）"
         )
 
+    # 边界定不出位置：该边界整个包都不会生成，但 build_and_run 照样 success=True。
+    # 按用户决定（2026-10-13）**只警告、照旧放行** —— 但必须让人看得见。
+    bw_html = _boundary_warning_card_html(gates["boundary_warnings"])
+    if bw_html:
+        monitor.warn(f"边界未定位 {len(gates['boundary_warnings'])} 条（已显示在结果面板）")
+    warn_html += bw_html
+
     # ---- 闸 3 的界面半边：源区定位（阻断 + 摘要展示）----
     # East Texas 案例的污染羽之所以看起来像水流模型结果，根因就在这里：
     # 填埋场只占 132 格（0.59%），但带浓度的 RCH 边界找不到注入位置时，
@@ -1259,7 +1288,7 @@ def run_model_handler(json_ir: dict, sid: str = "default"):
             callout("err", "源区定位失败，已阻止建模",
                     "<div>避免把点源静默放大成全域面源"
                     "（那正是污染羽看起来像水流模型结果的原因）。</div>"
-                    f"<pre class='gw-pre-wrap'>{detail}</pre>"),
+                    f"<pre class='gw-pre-wrap'>{detail}</pre>") + bw_html,
             empty_fig, empty_fig, None, "# 等待建模...", monitor.get_recent_logs(40),
         )
 

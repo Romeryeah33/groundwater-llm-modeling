@@ -103,6 +103,7 @@ def apply_pregates(
           ``source_zones``       解析成功的 ``{名称: 结果}``
           ``source_zone_issues`` 失败项 ``[[名称, 消息], ...]``
           ``source_zone_rows``   人类可读的源区摘要行
+          ``boundary_warnings``  "边界定不出位置"的中文提示行（**不阻断建模**）
           ``errors``             人话错误信息（界面/接口都能直接展示）
           ``ir``                 处理后的 IR（与入参同一个对象）
     """
@@ -110,6 +111,7 @@ def apply_pregates(
     from app.modeling.source_zone import (
         SourceZoneUnresolved,
         materialize_source_zones,
+        unplaced_boundaries,
     )
     from app.physics_engine.validator import quick_validate
 
@@ -125,9 +127,24 @@ def apply_pregates(
         "source_zones": {},
         "source_zone_issues": [],
         "source_zone_rows": [],
+        # 需要整条边界、却定不出位置的边界。**只警告不阻断**（2026-10-13 与用户
+        # 确认）：建模照跑，但用户必须看得见"这个边界没生效"。此前这种情况是
+        # 完全静默的 —— 包不生成、`build_and_run` 照样返回 success=True。
+        "boundary_warnings": [],
         "errors": [],
         "ir": ir,
     }
+
+    # ---- 边界定位预检（不阻断，纯提示）------------------------------------
+    # 放在最前面：它不依赖任何一道闸，且被拦在任何一道闸时用户同样需要知道
+    # "就算你补齐了参数，这条边界也落不下去"。纯函数，对 IR 无副作用。
+    try:
+        report["boundary_warnings"] = [
+            f"边界 '{u['name']}'（{u['type'].upper()}）不会写入模型：{u['reason']}"
+            for u in unplaced_boundaries(ir)
+        ]
+    except Exception as e:  # 预检自己炸了不该阻断建模，记一笔即可
+        logger.warning("边界定位预检抛异常: %s: %s", type(e).__name__, e)
 
     def _blocked(stage: str) -> dict:
         """被拦下时的统一收尾：算好源区摘要行（此时通常为空）再返回。"""

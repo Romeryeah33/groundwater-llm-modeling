@@ -140,6 +140,8 @@ def _run_model_task(task_id: str, ir: dict, sid: str) -> None:
             reaction_effective=result.get("reaction_effective") or {},
             build_warnings=result.get("build_warnings") or [],
             source_zone_rows=gates["source_zone_rows"],
+            # 边界没生效但模型照跑 —— 接口调用方必须能看见，否则与界面口径不一致
+            boundary_warnings=gates["boundary_warnings"],
             workspace=str(ws),
             files=_list_outputs(ws),
         )
@@ -157,6 +159,7 @@ def _public_gates(gates: dict) -> dict:
         "missing": gates.get("missing") or {},
         "validation": gates.get("validation") or {},
         "source_zone_rows": gates.get("source_zone_rows") or [],
+        "boundary_warnings": gates.get("boundary_warnings") or [],
         "errors": gates.get("errors") or [],
     }
 
@@ -322,6 +325,7 @@ async def model_result(task_id: str, x_api_token: Optional[str] = Header(None)):
             "reaction_effective": t.get("reaction_effective") or {},
             "build_warnings": t.get("build_warnings") or [],
             "source_zone_rows": t.get("source_zone_rows") or [],
+            "boundary_warnings": t.get("boundary_warnings") or [],
             "files": t.get("files") or [],
         }
 

@@ -195,9 +195,9 @@ class FloPyModelMapper:
     # ================================================================
 
     def _infer_edge_indices(self, bc_name: str, grid: dict, layer=None,
-                            bc_type: str = None) -> list:
+                            bc_type: str = None, position: str = None) -> list:
         """
-        从边界名称推断网格边界的 IJ 索引
+        从边界名称/显式方位推断网格边界的 IJ 索引
 
         支持：west/西/left/左, east/东/right/右, north/北/top/上, south/南/bottom/下
 
@@ -205,11 +205,17 @@ class FloPyModelMapper:
         （"well"→含"w"→误判为west）、复合方向（"northeast"→含"east"→误判为east）
         等产生误匹配。
 
+        `position` 是 IR 里**显式声明**的方位，**优先于** `bc_name`：名字只是命名
+        习惯，position 才是"这条边界在哪"的直接声明。此前只认名字，于是
+        `{"name": "上游定水头", "position": "west"}` 里的 west 被无视，边界落到
+        名字误命中的北边界上且无任何提示。
+
         实现已下沉到 `app.modeling.source_zone.infer_edge_indices`，与源区解析器
         共用同一份关键词表 —— 否则"是不是方位型名称"会有两份判断，对
         `top_of_landfill` 这类名字给出不同答案。`rch`/`evt`/`wel` 一律返回空。
         """
-        return infer_edge_indices(bc_name, grid, layer=layer, bc_type=bc_type)
+        return infer_edge_indices(bc_name, grid, layer=layer, bc_type=bc_type,
+                                  position=position)
 
     def map_boundary_conditions(self, json_ir: dict) -> dict:
         """
@@ -255,13 +261,26 @@ class FloPyModelMapper:
             # 获取网格IJK索引（如果有）
             indices = bc.get("geometry", {}).get("grid_indices", [])
 
-            # 如果没有显式索引，尝试从名称推断
+            # 如果没有显式索引，尝试从 position/名称推断
             if not indices:
                 bc_name = bc.get("name", "")
-                inferred = self._infer_edge_indices(bc_name, grid, bc_type=bc_type)
+                # position 优先于名字里的方位词。顶层 position 与 geometry.position
+                # 都认 —— intent_parser 两个都会写（East Texas 案例两个都有且一致）。
+                _geo = bc.get("geometry")
+                bc_position = bc.get("position") or (
+                    _geo.get("position") if isinstance(_geo, dict) else None)
+                inferred = self._infer_edge_indices(
+                    bc_name, grid, bc_type=bc_type, position=bc_position)
                 if inferred:
                     indices = inferred
-                    logger.info(f"边界 '{bc_name}' 自动推断为 {len(indices)} 个网格单元")
+                    logger.info(f"边界 '{bc_name}' 自动推断为 {len(inferred)} 个网格单元")
+                else:
+                    # 推不出位置 = 这个包根本不会生成（不是"小一点"）。这里只记日志，
+                    # **面向用户的警告**由 run_gates.unplaced_boundaries 统一产生 ——
+                    # logger 的警告进不了界面（见"时长 150000 的界面可见性"那次教训）。
+                    logger.warning(
+                        "边界 '%s'（type=%s, position=%r）推不出网格位置 —— "
+                        "该边界不会写入模型", bc_name, bc_type, bc_position)
 
             # 获取应力期数据
             sp_data = bc.get("stress_periods", [])
@@ -282,12 +301,10 @@ class FloPyModelMapper:
                             (idx.get("layer", 0), idx.get("row", 0), idx.get("col", 0)),
                             head,
                         ] + ([conc] if conc is not None else []))
-                elif sp_data:
-                    for sp in sp_data:
-                        per = sp.get("period", 0)
-                        if per not in packages[package_name]:
-                            packages[package_name][per] = []
-                        logger.warning(f"CHD '{bc.get('name')}' without grid indices — skipped")
+                # 没有 indices 时**什么都不写** —— 包不会生成，警告已在上面的
+                # "推不出网格位置"里给出（面向用户的版本由 run_gates 统一产生）。
+                # 这里曾经为每个应力期建一个空列表再逐期打一条相同警告，既没作用
+                # 又把同一条消息刷了 nper 遍。
 
             elif bc_type == "wel":
                 raw_rate = params.get("rate", 0.0)
