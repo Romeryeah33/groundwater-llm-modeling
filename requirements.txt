@@ -1,0 +1,43 @@
+# ============================================================
+# 物理约束嵌入LLM的地下水智能建模原型系统 — 依赖清单
+# groundwater-llm-modeling v1.0
+# ============================================================
+
+# --- Web框架 ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+websockets>=10.0
+gradio>=4.20.0
+
+# --- LLM统一网关 ---
+litellm>=1.35.0
+
+# --- 物理建模 ---
+flopy>=3.6.0
+
+# --- 数据处理 ---
+numpy>=1.26.0
+scipy>=1.12.0
+pandas>=2.2.0
+pydantic>=2.6.0
+
+# --- GIS空间处理 ---
+geopandas>=0.14.0
+rasterio>=1.3.0
+pykrige>=1.7.0
+elevation>=1.1.0
+
+# --- 可视化 ---
+matplotlib>=3.8.0
+plotly>=5.18.0
+folium>=0.16.0
+
+# --- 文档生成 ---
+python-docx>=1.1.0
+
+# --- 数据库 ---
+# SQLite (Python标准库自带)
+
+# --- 工具 ---
+python-multipart>=0.0.9
+aiofiles>=23.2.0

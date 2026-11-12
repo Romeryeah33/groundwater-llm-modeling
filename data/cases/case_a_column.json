@@ -1,0 +1,107 @@
+{
+  "ir_version": "1.0",
+  "project": {
+    "name": "ob_column",
+    "model_type": "solute_transport"
+  },
+  "grid": {
+    "nrow": 1,
+    "ncol": 500,
+    "nlay": 1,
+    "delr": 0.2,
+    "delc": 1.0,
+    "top": 1.0,
+    "bottom": 0.0
+  },
+  "aquifer": {
+    "type": "confined",
+    "parameters": {
+      "hk": {
+        "value": 1.0,
+        "unit": "m/d"
+      },
+      "vka": {
+        "value": 0.1,
+        "unit": "m/d"
+      },
+      "ss": {
+        "value": 1e-06,
+        "unit": "1/m"
+      },
+      "sy": {
+        "value": 0.2
+      },
+      "porosity": {
+        "value": 0.25
+      }
+    }
+  },
+  "boundary_conditions": [
+    {
+      "type": "chd",
+      "name": "inlet_west",
+      "parameters": {
+        "head": {
+          "value": 1.0
+        },
+        "concentration": {
+          "value": 1.0
+        }
+      }
+    },
+    {
+      "type": "chd",
+      "name": "outlet_east",
+      "parameters": {
+        "head": {
+          "value": 0.0
+        },
+        "concentration": {
+          "value": 0.0
+        }
+      }
+    }
+  ],
+  "stress_periods": {
+    "nper": 1,
+    "steady_state": false,
+    "period_data": [
+      {
+        "perlen": 1250.0,
+        "nstp": 2500,
+        "tsmult": 1.0
+      }
+    ]
+  },
+  "transport": {
+    "enabled": true,
+    "porosity": {
+      "value": 0.25
+    },
+    "advection": {
+      "scheme": "tvd"
+    },
+    "dispersion": {
+      "al": {
+        "value": 1.0
+      },
+      "trpt": {
+        "value": 0.0
+      },
+      "trpv": {
+        "value": 0.0
+      },
+      "diffc": {
+        "value": 0.0
+      }
+    },
+    "initial_concentration": 0.0
+  },
+  "solver": {
+    "name": "pcg",
+    "parameters": {
+      "hclose": 1e-08,
+      "rclose": 1e-10
+    }
+  }
+}

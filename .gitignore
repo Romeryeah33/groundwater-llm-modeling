@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 环境变量（含API密钥）
+# .env 与 .env.* 都要写：.env.* 匹配不到裸 .env，而 .env.local /
+# .env.bak.20260916 这类副本同样是 .env 的拷贝，一样带着真实 Key
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 运行时输出
+data/outputs/*
+!data/outputs/.gitkeep
+data/sessions/
+data/uploads/
+
+# 日志
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# MODFLOW 运行临时文件
+*.hds
+*.bud
+*.cbc
+*.ucn
+*.ddn
+*.list
+*.lst

@@ -1,0 +1,737 @@
+{
+  "ir_version": "1.0",
+  "project": {
+    "name": "rch_aux_l2",
+    "model_type": "solute_transport"
+  },
+  "grid": {
+    "nrow": 10,
+    "ncol": 40,
+    "nlay": 2,
+    "delr": 10.0,
+    "delc": 10.0,
+    "top": 30.0,
+    "bottom": 10.0
+  },
+  "aquifer": {
+    "type": "confined",
+    "parameters": {
+      "hk": {
+        "value": 2.0,
+        "unit": "m/d"
+      },
+      "vka": {
+        "value": 0.2,
+        "unit": "m/d"
+      },
+      "ss": {
+        "value": 1e-05,
+        "unit": "1/m"
+      },
+      "sy": {
+        "value": 0.15
+      },
+      "porosity": {
+        "value": 0.3
+      }
+    }
+  },
+  "boundary_conditions": [
+    {
+      "type": "ghb",
+      "name": "west_boundary",
+      "parameters": {
+        "stage": {
+          "value": 30.0
+        },
+        "conductance": {
+          "value": 200.0
+        }
+      }
+    },
+    {
+      "type": "ghb",
+      "name": "east_boundary",
+      "parameters": {
+        "stage": {
+          "value": 25.0
+        },
+        "conductance": {
+          "value": 200.0
+        }
+      }
+    },
+    {
+      "type": "rch",
+      "name": "landfill",
+      "parameters": {
+        "rate": {
+          "value": 0.0001
+        },
+        "concentration": {
+          "value": 500.0
+        }
+      },
+      "geometry": {
+        "grid_indices": [
+          {
+            "layer": 0,
+            "row": 0,
+            "col": 0,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 0,
+            "col": 1,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 0,
+            "col": 2,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 0,
+            "col": 3,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 0,
+            "col": 4,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 0,
+            "col": 5,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 0,
+            "col": 6,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 0,
+            "col": 7,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 0,
+            "col": 8,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 0,
+            "col": 9,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 1,
+            "col": 0,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 1,
+            "col": 1,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 1,
+            "col": 2,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 1,
+            "col": 3,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 1,
+            "col": 4,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 1,
+            "col": 5,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 1,
+            "col": 6,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 1,
+            "col": 7,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 1,
+            "col": 8,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 1,
+            "col": 9,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 2,
+            "col": 0,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 2,
+            "col": 1,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 2,
+            "col": 2,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 2,
+            "col": 3,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 2,
+            "col": 4,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 2,
+            "col": 5,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 2,
+            "col": 6,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 2,
+            "col": 7,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 2,
+            "col": 8,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 2,
+            "col": 9,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 3,
+            "col": 0,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 3,
+            "col": 1,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 3,
+            "col": 2,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 3,
+            "col": 3,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 3,
+            "col": 4,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 3,
+            "col": 5,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 3,
+            "col": 6,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 3,
+            "col": 7,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 3,
+            "col": 8,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 3,
+            "col": 9,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 4,
+            "col": 0,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 4,
+            "col": 1,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 4,
+            "col": 2,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 4,
+            "col": 3,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 4,
+            "col": 4,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 4,
+            "col": 5,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 4,
+            "col": 6,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 4,
+            "col": 7,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 4,
+            "col": 8,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 4,
+            "col": 9,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 5,
+            "col": 0,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 5,
+            "col": 1,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 5,
+            "col": 2,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 5,
+            "col": 3,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 5,
+            "col": 4,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 5,
+            "col": 5,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 5,
+            "col": 6,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 5,
+            "col": 7,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 5,
+            "col": 8,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 5,
+            "col": 9,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 6,
+            "col": 0,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 6,
+            "col": 1,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 6,
+            "col": 2,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 6,
+            "col": 3,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 6,
+            "col": 4,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 6,
+            "col": 5,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 6,
+            "col": 6,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 6,
+            "col": 7,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 6,
+            "col": 8,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 6,
+            "col": 9,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 7,
+            "col": 0,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 7,
+            "col": 1,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 7,
+            "col": 2,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 7,
+            "col": 3,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 7,
+            "col": 4,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 7,
+            "col": 5,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 7,
+            "col": 6,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 7,
+            "col": 7,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 7,
+            "col": 8,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 7,
+            "col": 9,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 0,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 1,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 2,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 3,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 4,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 5,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 6,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 7,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 8,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 8,
+            "col": 9,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 0,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 1,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 2,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 3,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 4,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 5,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 6,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 7,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 8,
+            "period": 0
+          },
+          {
+            "layer": 0,
+            "row": 9,
+            "col": 9,
+            "period": 0
+          }
+        ]
+      }
+    }
+  ],
+  "stress_periods": 1,
+  "transport": {
+    "enabled": true,
+    "porosity": {
+      "value": 0.3
+    },
+    "advection": {
+      "scheme": "tvd"
+    },
+    "dispersion": {
+      "al": {
+        "value": 20.0
+      },
+      "trpt": {
+        "value": 0.1
+      },
+      "trpv": {
+        "value": 0.01
+      },
+      "diffc": {
+        "value": 1e-08
+      }
+    },
+    "initial_concentration": 0.0,
+    "stress_periods": {
+      "nper": 1,
+      "steady_state": false,
+      "period_data": [
+        {
+          "perlen": 365.0,
+          "nstp": 365,
+          "tsmult": 1.0
+        }
+      ]
+    }
+  },
+  "solver": {
+    "name": "pcg",
+    "parameters": {
+      "hclose": 1e-06,
+      "rclose": 1e-09
+    }
+  },
+  "domain": {
+    "x_range": [
+      0.0,
+      400.0
+    ],
+    "y_range": [
+      0.0,
+      100.0
+    ]
+  },
+  "initial_conditions": {
+    "type": "top_elevation"
+  }
+}

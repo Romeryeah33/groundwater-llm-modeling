@@ -1,0 +1,32 @@
+# ============================================================
+# Docker Compose — 一键启动
+#
+# 使用方法:
+#   1. 创建 .env 文件（参考 .env.example），填入 API Key
+#   2. docker compose -f docker/docker-compose.yml up -d
+#   3. 浏览器打开 http://localhost:7860
+# ============================================================
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: gw-modeling:v0.2.0
+    container_name: gw-modeling
+    ports:
+      - "${GRADIO_PORT:-7860}:7860"
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
+      - LLM_MODEL=${LLM_MODEL:-deepseek-chat}
+      - LLM_API_KEY=${LLM_API_KEY:?请先在 .env 文件中设置 LLM_API_KEY}
+      - LLM_API_BASE=${LLM_API_BASE:-https://api.deepseek.com/v1}
+      - GRADIO_SERVER_NAME=0.0.0.0
+      - PYTHONIOENCODING=utf-8
+    volumes:
+      - model_data:/app/data
+      - model_logs:/app/logs
+    restart: unless-stopped
+
+volumes:
+  model_data:
+  model_logs:
